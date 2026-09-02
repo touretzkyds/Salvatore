@@ -1,0 +1,6 @@
+# Camera-based domino perception (StateMachineProgram(domino=True)).
+# Optional: Salvatore runs conversation-only teaching without these installed.
+# Install with:  pip install -r requirements-vision.txt
+ultralytics
+torch
+torchvision

@@ -1,0 +1,655 @@
+#!/usr/bin/env python3
+
+"""
+VEX AIM Simple CLI
+================
+A simple Command Line Interface for VEX AIM.
+"""
+
+################ Imports
+
+import asyncio
+import atexit
+import code
+import datetime
+import logging
+import os
+import platform
+import re
+import signal
+import readline
+import rlcompleter
+import subprocess
+import sys
+import threading
+import time
+import traceback
+from importlib import __import__, reload
+from queue import Empty, SimpleQueue
+
+try:
+    from termcolor import cprint
+except:
+    def cprint(string, color=None):
+        print(string)
+
+try:
+    import matplotlib
+    import matplotlib.pyplot as plt
+except:
+    pass
+
+import aim_fsm
+from aim_fsm import *
+from aim_fsm.program import runfsm as _program_runfsm
+from viewer.lifecycle import ensure_viewer as _ensure_viewer_for_target
+
+try:
+    from viewer.imshow_manager import imshow_pump
+except Exception:
+    imshow_pump = None
+
+################ Configuration
+
+# tab completion
+if 'libedit' in readline.__doc__:    # Macs might not use GNU readline
+    # Use libedit-specific binding for tab
+    readline.parse_and_bind("bind ^I rl_complete")
+else:
+    readline.parse_and_bind('tab: complete')
+
+# Qt event processing flag (set by SIGALRM handler)
+_qt_needs_processing = False
+
+# history file
+if 'HOME' in os.environ:  # Linux
+    histfile = os.path.join(os.environ['HOME'], '.pythonhistory')
+elif 'USERPROFILE' in os.environ:  # Windows
+    histfile = os.path.join(os.environ['USERPROFILE'], '.pythonhistory')
+else:
+    histfile = '.pythonhistory'
+
+try:
+    readline.read_history_file(histfile)
+except:
+    pass
+
+atexit.register(readline.write_history_file, histfile)
+
+os_version = platform.system()
+
+# Put current directory on search path.
+if '.' not in sys.path:
+    sys.path.append('.')
+
+
+def _qt_event_handler(signum, frame):
+    """Signal handler - only set flag, never call Qt here."""
+    global _qt_needs_processing
+    _qt_needs_processing = True
+
+
+if hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer"):
+    try:
+        signal.signal(signal.SIGALRM, _qt_event_handler)
+        signal.setitimer(signal.ITIMER_REAL, 0.05, 0.05)
+    except ValueError:
+        # Signals only work in the main thread; ignore if not available.
+        pass
+
+################ CLI functions
+
+ans = None
+RUNNING = True
+
+
+def runfsm(module_name):
+    new_fsm = _program_runfsm(module_name)
+    globals()['running_fsm'] = aim_fsm.program.running_fsm
+    _process_pending_viewer_launches(timeout=0.1)
+    return new_fsm
+
+
+def _ensure_viewer(attr, factory):
+    target = globals().get('robot')
+    return _ensure_viewer_for_target(target, attr, factory)
+
+
+def _prime_default_viewers(program, launch_overrides=None):
+    if program is None:
+        return
+
+    target_robot = getattr(program, 'robot', None) or globals().get('robot')
+    if target_robot is None:
+        return
+
+    flags = launch_overrides or {}
+    if flags.get('cam', getattr(program, 'launch_cam_viewer', False)):
+        _ensure_viewer_for_target(target_robot, 'cam_viewer', lambda: CamViewer(target_robot))
+
+    if flags.get('worldmap', getattr(program, 'launch_worldmap_viewer', False)):
+        _ensure_viewer_for_target(target_robot, 'worldmap_viewer', lambda: WorldMapViewer(target_robot))
+
+    if flags.get('particle', getattr(program, 'launch_particle_viewer', False)):
+        _ensure_viewer_for_target(target_robot, 'particle_viewer', lambda: ParticleViewer(target_robot))
+
+    if flags.get('path', getattr(program, 'launch_path_viewer', False)):
+        _ensure_viewer_for_target(target_robot, 'path_viewer', lambda: PathViewer(target_robot))
+
+
+_pending_viewer_launches = SimpleQueue()
+
+
+def _capture_launch_flags(program):
+    return {
+        'cam': bool(getattr(program, 'launch_cam_viewer', False)),
+        'worldmap': bool(getattr(program, 'launch_worldmap_viewer', False)),
+        'particle': bool(getattr(program, 'launch_particle_viewer', False)),
+        'path': bool(getattr(program, 'launch_path_viewer', False)),
+    }
+
+
+_original_state_machine_start = StateMachineProgram.start
+
+
+def _start_with_main_thread_viewers(self, *args, **kwargs):
+    launch_flags = _capture_launch_flags(self)
+    on_main_thread = threading.current_thread() is threading.main_thread()
+    if not on_main_thread:
+        self.launch_cam_viewer = False
+        self.launch_worldmap_viewer = False
+        self.launch_particle_viewer = False
+        self.launch_path_viewer = False
+    try:
+        return _original_state_machine_start(self, *args, **kwargs)
+    finally:
+        if not on_main_thread:
+            self.launch_cam_viewer = launch_flags['cam']
+            self.launch_worldmap_viewer = launch_flags['worldmap']
+            self.launch_particle_viewer = launch_flags['particle']
+            self.launch_path_viewer = launch_flags['path']
+            _pending_viewer_launches.put((self, launch_flags))
+
+
+StateMachineProgram.start = _start_with_main_thread_viewers
+
+
+def _drain_pending_viewer_launches_once():
+    processed = False
+    while True:
+        try:
+            program, launch_flags = _pending_viewer_launches.get_nowait()
+        except Empty:
+            break
+        _prime_default_viewers(program, launch_flags)
+        processed = True
+    if imshow_pump is not None:
+        processed = imshow_pump() or processed
+    return processed
+
+
+def _process_pending_viewer_launches(timeout=0.0):
+    if timeout <= 0.0:
+        _drain_pending_viewer_launches_once()
+        return
+
+    deadline = time.monotonic() + timeout
+    while True:
+        processed = _drain_pending_viewer_launches_once()
+        if processed:
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            break
+        time.sleep(min(0.01, remaining))
+
+def _process_qt_events_if_needed():
+    global _qt_needs_processing
+    if not _qt_needs_processing:
+        return
+    _qt_needs_processing = False
+    try:
+        from PyQt6.QtGui import QGuiApplication
+    except ImportError:
+        return
+    app = QGuiApplication.instance()
+    if app:
+        app.processEvents()
+
+
+def _flush_main_thread_gui(timeout=0.15):
+    _process_qt_events_if_needed()
+    _process_pending_viewer_launches(timeout=timeout)
+    _process_qt_events_if_needed()
+
+def cli_loop(_robot):
+    global ans, RUNNING, robot, file_to_run, running_fsm
+
+    robot = _robot
+
+    cli_globals = globals()
+    cli_globals['ans'] = None
+
+    running_fsm = aim_fsm.program.running_fsm = None
+    cli_globals['running_fsm'] = running_fsm
+    if file_to_run:
+        time.sleep(0.25)
+        running_fsm = runfsm(file_to_run)
+        cli_globals['running_fsm'] = running_fsm
+    else:
+        running_fsm = aim_fsm.program.running_fsm = StateMachineProgram()
+        cli_globals['running_fsm'] = running_fsm
+        robot.loop.call_soon_threadsafe(running_fsm.start)
+
+    cli_loop._console = code.InteractiveConsole()
+    _process_pending_viewer_launches(timeout=0.5)
+    while True:
+        if RUNNING == False:
+            return
+        cli_loop._line = ''
+        while cli_loop._line == '':
+            running_fsm = aim_fsm.program.running_fsm
+            _process_qt_events_if_needed()
+            _process_pending_viewer_launches()
+            readline.write_history_file(histfile)
+            try:
+                sys.stdout.flush()
+                cli_loop._line = cli_loop._console.raw_input('C> ').strip()
+            except KeyboardInterrupt:
+                process_interrupt()
+                continue
+            except EOFError:
+                print("EOF.\nType 'exit' to exit.\n")
+                continue
+            try:
+                robot.kine.get_pose()
+            except: pass
+        if cli_loop._line[0] == '!':
+            do_shell_command(cli_loop._line[1:])
+            continue
+        elif cli_loop._line == '.':
+            continue
+        elif cli_loop._line[0:2] == '. ':
+            do_hear_command(cli_loop._line[2:])
+            _flush_main_thread_gui()
+            continue
+        elif cli_loop._line[0:2] == '.?':
+            show_messages(cli_loop._line)
+            continue
+        elif cli_loop._line[0:3] == 'tm ' or cli_loop._line == 'tm':
+            text_message(cli_loop._line[3:])
+            _flush_main_thread_gui()
+            continue
+        elif cli_loop._line[0:5] == 'show ' or cli_loop._line == 'show':
+            show_args = cli_loop._line[5:].split(' ')
+            try:
+                show_stuff(show_args)
+            except Exception:
+                traceback.print_exc()
+                print()
+            continue
+        elif cli_loop._line[0:8] == 'restart ' or  cli_loop._line == 'restart':
+            restart_stuff(cli_loop._line[8:])
+            continue
+        elif cli_loop._line == '/oa':
+            cli_loop._line = "oa = robot.world_map.objects['OrangeBarrel.a']"
+        elif cli_loop._line == '/ob':
+            cli_loop._line = "ob = robot.world_map.objects['OrangeBarrel.b']"
+        elif cli_loop._line == '/ba':
+            cli_loop._line = "ba = robot.world_map.objects['BlueBarrel.a']"
+        elif cli_loop._line == '/bb':
+            cli_loop._line = "bb = robot.world_map.objects['BlueBarrel.b']"
+        elif cli_loop._line[0:7] == 'reload ':
+            do_reload(cli_loop._line[7:])
+            continue
+        elif cli_loop._line[0:6] == 'start ' or cli_loop._line == 'start':
+            start_args = cli_loop._line[6:].split(' ')
+            start_stuff(start_args)
+            continue
+        elif cli_loop._line[0:5] == 'stop ' or cli_loop._line == 'stop':
+            stop_args = cli_loop._line[5:].split(' ')
+            stop_stuff(stop_args)
+            continue
+        cli_loop._do_await = False
+        if cli_loop._line[0:7] == 'import ' or cli_loop._line[0:5] == 'from '  or \
+               cli_loop._line[0:7] == 'global ' or cli_loop._line[0:4] == 'del '   or \
+               cli_loop._line[0:4] == 'for ' or cli_loop._line[0:6] == 'while ' or \
+               cli_loop._line[0:4] == 'def '    or cli_loop._line[0:6] == 'async ' :
+            # Can't use assignment to capture a return value, so None.
+            ans = None
+        elif cli_loop._line[0:6] == 'await ':
+            cli_loop._do_await = True
+            cli_loop._line = 'ans=' + cli_loop._line[6:]
+        elif cli_loop._line[0:5] == 'exit':
+            loop.stop()
+            # Clean up
+            try:
+                world_viewer.exited = True
+            except: pass
+            if running_fsm:
+                running_fsm.stop()
+            print('exiting...')
+            RUNNING=False
+            continue
+        else:
+            cli_loop._line = 'ans=' + cli_loop._line
+        try:
+            exec(cli_loop._line, cli_globals)
+            if cli_loop._do_await:
+                print("Can't use await outside of an async def.")
+                ans = None # ans = await ans
+            if not ans is None:
+                print(ans,end='\n\n')
+        except KeyboardInterrupt:
+            print('Keyboard interrupt!')
+        except SystemExit:
+            print('Type exit() again to exit Python.')
+            RUNNING = False
+        except Exception:
+            traceback.print_exc()
+            print()
+        finally:
+            _process_pending_viewer_launches()
+
+def process_interrupt():
+    robot.robot0.stop_all_movement()
+    running_fsm = aim_fsm.program.running_fsm
+    if running_fsm and running_fsm.running:
+        print('\nKeyboardInterrupt: stopping', running_fsm.name)
+        running_fsm.stop()
+    else:
+        print("\nKeyboardInterrupt. Type 'exit' to exit.")
+
+################ CLI commands
+
+def text_message(msg):
+    running_fsm = aim_fsm.program.running_fsm
+    if not running_fsm or not running_fsm.running:
+        print('No state machine running. Use runfsm(module_name) to start a state machine.')
+        return
+    try:
+        running_fsm.robot.erouter.post(TextMsgEvent(msg))
+    except KeyboardInterrupt: raise
+    except Exception as e:
+        traceback.print_exc()
+        print()
+
+def show_stuff(args):
+    global running_fsm
+    running_fsm = aim_fsm.program.running_fsm
+    spec = args[0] if len(args) > 0 else ""
+    if spec == 'active':
+        if not running_fsm:
+            print('No state machine present.')
+        elif not running_fsm.running:
+            print("State machine '%s' is not running." % running_fsm.name)
+        else:
+            show_active(running_fsm,0)
+    elif spec == "battery":
+        print(f'Battery capacity {robot.robot0.get_battery_capacity()}%\n')
+    elif spec == "kine":
+        show_kine(args[1:])
+    elif spec == 'cam_viewer' or spec=='viewer':
+        if running_fsm:
+            running_fsm.cam_viewer = True
+        _ensure_viewer('cam_viewer', lambda: CamViewer(robot))
+    elif spec == "crosshairs":
+        viewer = _ensure_viewer('cam_viewer', lambda: CamViewer(robot))
+        if viewer is not None:
+            viewer.crosshairs = not viewer.crosshairs
+    elif spec == "particle_viewer":
+        _ensure_viewer('particle_viewer', lambda: ParticleViewer(robot))
+    elif spec == "path_viewer":
+        _ensure_viewer('path_viewer', lambda: PathViewer(robot))
+    elif spec == "worldmap_viewer":
+        _ensure_viewer('worldmap_viewer', lambda: WorldMapViewer(robot))
+    elif (spec == "all") or (spec == "all_viewers"):
+        if running_fsm:
+            running_fsm.cam_viewer = True
+        _ensure_viewer('cam_viewer', lambda: CamViewer(robot))
+        _ensure_viewer('worldmap_viewer', lambda: WorldMapViewer(robot))
+        _ensure_viewer('particle_viewer', lambda: ParticleViewer(robot))
+        _ensure_viewer('path_viewer', lambda: PathViewer(robot))
+    elif spec == "pose":
+        robot.show_pose()
+    elif spec == "objects":
+        robot.world_map.show_objects()
+    elif spec == "landmarks":
+        robot.particle_filter.show_landmarks()
+    elif spec == "particle":
+        robot.particle_filter.show_particle(args[1:])
+#    elif spec == "camera":
+#        show_camera(args[1:])
+    else:
+        print("""Invalid option. Try one of:
+  show all | all_viewers           Launch every viewer (PyQt6)
+  show active                      Display running FSM stack
+  show battery                     Query robot battery level
+  show crosshairs                  Toggle camera crosshairs
+  show kine [joint]                Dump kinematics state
+  show landmarks                   Print SLAM landmarks
+  show objects                     Print world objects
+  show particle n                  Highlight particle n
+  show pose                        Print robot pose
+  show viewer | cam_viewer         Open PyQt6 camera viewer
+  show particle_viewer             Open PyQt6 particle viewer
+  show worldmap_viewer             Open PyQt6 world map viewer
+  show path_viewer                 Open PyQt6 path/wavefront viewer
+  restart img_thread               Restart the image thread to unfreeze camera
+   """)
+
+
+def show_active(node,depth):
+    if node.running: print('  '*depth, node)
+    for child in node.children.values():
+        show_active(child, depth+1)
+    for trans in node.transitions:
+        if trans.running: print('  '*(depth+1), trans)
+
+def show_kine(args):
+    if len(args) == 0:
+        show_kine_tree(0, robot.kine.joints['base'])
+        print()
+    elif len(args) == 1:
+        show_kine_joint(args[0])
+    else:
+        print('Usage:  show kine [joint]')
+
+def show_kine_tree(level, joint):
+    qstring = ''
+    if joint.type != 'fixed':
+        if isinstance(joint.q, (float,int)):
+            qval = ('%9.5g' % joint.q).strip()
+            if joint.type == 'revolute':
+                qval = qval + (' (%.1f deg.)' % (joint.q*180/pi))
+        else:
+            qval = '(' + (', '.join([('%9.5g' % v).strip() for v in joint.q])) + ')'
+        qstring = ' q=' + qval
+    print('  '*level, joint.name, ': ', joint.type, qstring, sep='')
+    for child in joint.children:
+        show_kine_tree(level+1, child)
+
+def show_kine_joint(name):
+    if name not in robot.kine.joints:
+        print("'"+repr(name)+"' is not the name of a joint.  Try 'show kine'.")
+        return
+    joint = robot.kine.joints[name]
+    fmt = '%10s'
+
+    def formatq(type,val):
+        if type == 'revolute':
+            if val == inf:
+                return 'inf'
+            elif val == -inf:
+                return '-inf'
+            jrad = ('%9.5g' % val).strip() + ' radians'
+            jdeg = '(' + ('%9.5g' % (val * 180/pi)).strip() + ' degrees)' if val != 0 else ''
+            return jrad + ' ' + jdeg
+        elif type == 'prismatic':
+            return ('%9.5g' % val).strip() + ' mm'
+        elif type == 'fixed':
+            return ''
+        elif type == 'world':
+            if val is None:
+                return ''
+            else:
+                return '(' + (', '.join(['%9.5g' % x for x in val])) + ')'
+        else:
+            raise ValueError(type)
+
+    print(fmt % 'Name:', name)
+    print(fmt % 'Type:', joint.type)
+    print(fmt % 'Parent:', joint.parent.name if joint.parent else '')
+    print(fmt % 'Descr.:', joint.description)
+    print(fmt % 'q:', formatq(joint.type, joint.q))
+    print(fmt % 'qmin:', formatq(joint.type, joint.qmin))
+    print(fmt % 'qmax:', formatq(joint.type, joint.qmax))
+    print(fmt % 'DH d:', formatq('prismatic',joint.d))
+    print(fmt % 'DH theta:', formatq('revolute',joint.theta))
+    print(fmt % 'DH alpha:', formatq('revolute',joint.alpha))
+    print(fmt % 'DH r:', formatq('prismatic',joint.r))
+    print(fmt % 'Link in base frame:')
+    tprint(robot.kine.link_to_base(name))
+    print()
+
+def show_messages(line):
+    # line begins with '.?'
+    index = None
+    m = re.match(r'^\.\?+$', line)
+    if m is not None:
+        index = - (m.span()[1] - 1)
+    else:
+        try:
+            index = int(line[2:])
+        except:
+            pass
+    if index is not None:
+        try:
+            abs_index = index if index >= 0 else index + len(robot.openai_client.messages)
+            print(f'messages[{abs_index}] =', robot.openai_client.messages[index])
+            print()
+        except:
+            print(f'Invalid index: {index}.')
+    else:
+        print('Invalid syntax:  use .??? or .?[-3]')
+
+
+"""
+def show_landmarks():
+    landmarks = robot.world.particle_filter.sensor_model.landmarks
+    print('The particle filter has %d landmark%s:' %
+          (len(landmarks), '' if (len(landmarks) == 1) else 's'))
+    show_landmarks_helper(landmarks)
+
+def show_landmarks_helper(landmarks):
+    sorted_keys = sort_wmobject_ids(landmarks)
+    for key in sorted_keys:
+        value = landmarks[key]
+        if isinstance(value, Pose):
+            x = value.position.x
+            y = value.position.y
+            theta = value.rotation.angle_z.degrees
+            sigma_x = 0
+            sigma_y = 0
+            sigma_theta = 0
+        else:
+            x = value[0][0,0]
+            y = value[0][1,0]
+            theta = value[1] * 180/pi
+            sigma_x = sqrt(value[2][0,0])
+            sigma_y = sqrt(value[2][1,1])
+            sigma_theta = sqrt(value[2][2,2])*180/pi
+        if key.startswith('Aruco-'):
+            print('  Aruco marker %s' % key[6:], end='')
+        elif key.startswith('Wall-'):
+            print('  Wall %s' % key[5:], end='')
+        elif key.startswith('Cube-'):
+            print('  Cube %s' % key[5:], end='')
+        else:
+            print('  %r' % key, end='')
+        print(' at (%6.1f, %6.1f) @ %4.1f deg    +/- (%4.1f,%4.1f)  +/- %3.1f deg' %
+              (x, y, theta, sigma_x, sigma_y, sigma_theta))
+    print()
+"""
+
+def restart_stuff(args):
+    arg = args.strip()
+    if arg == 'img_thread':
+        robot.restart_img_thread()
+    else:
+        print('Usage:   restart img_thread')
+
+
+def start_stuff(args):
+    print('not yet implemented')
+
+def stop_stuff(args):
+    print('not yet implemented')
+
+def do_reload(module_name):
+    the_module = None
+    try:
+        the_module = reload(sys.modules[module_name])
+    except KeyError:
+        print("Module '%s' isn't loaded." % module_name)
+    except: raise
+    if the_module:
+        print(the_module)
+    print()
+
+def do_shell_command(cmd):
+    try:
+        subprocess.call(cmd, shell=True)
+    except Exception as e:
+        print(e)
+
+def do_hear_command(text):
+    utterance = text.strip().lower()
+    words = [robot.speech_listener.thesaurus.lookup_word(w) for w in utterance.split(" ")]
+    words = robot.speech_listener.thesaurus.substitute_phrases(words)
+    string = " ".join(words)
+    if len(string) == 0:
+        return
+    event = SpeechEvent(string, words)
+    robot.loop.call_soon_threadsafe(robot.erouter.post, event)
+
+################ Set up threads and robot
+
+global loop
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+# loop.set_debug(True)
+
+def loopthread():
+    global loop
+    #print(f"loop thead in {threading.current_thread().native_id}")
+    loop.run_forever()
+
+th = threading.Thread(target=loopthread)
+th.daemon = True
+th.start()
+
+if 'ROBOT' in os.environ:
+    robot_address = os.environ['ROBOT']
+else:
+    robot_address = "192.168.4.1"
+print(f'Connecting to {robot_address} ...')
+
+launch_speech_listener = 'ROBOT_NO_SPEECH' not in os.environ
+
+robot = Robot(loop=loop, host=robot_address,
+              launch_speech_listener=launch_speech_listener)
+evbase.robot_for_loading = robot
+
+################ Launch
+
+if len(sys.argv) > 1:
+    file_to_run = sys.argv[1]
+    if file_to_run[-4:] == '.fsm':
+        file_to_run = file_to_run[:-4]
+    elif file_to_run[-3:] == '.py':
+        file_to_run = file_to_run[:-3]
+else:
+    file_to_run = None
+
+cli_loop(robot)

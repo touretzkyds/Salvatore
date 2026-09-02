@@ -1,0 +1,857 @@
+import math
+from math import nan, sqrt
+import time
+import sys
+import asyncio
+import copy
+
+from .base import *
+from .utils import Pose
+from .rrt import *
+from .nodes import *
+from .events import PilotEvent
+from .transitions import *
+from .worldmap import WorldObject, DoorwayObj
+from .path_planner import PathPlanner, PathPlanToObject #, PathPlannerProcess
+from .particle import *
+from .geometry import *
+from .pilot0 import *
+from .camera import AIVISION_RESOLUTION_SCALE
+
+#---------------- Pilot Events ----------------
+
+class ParentPilotEvent(StateNode):
+    """Receive a PilotEvent and repost it from the receiver's parent. This allows
+     derived classes that use the Pilot to make its PilotEvents visible."""
+    def start(self,event):
+        super().start(event)
+        if not isinstance(event,PilotEvent):
+            raise TypeError("ParentPilotEvent must be invoked with a PilotEvent, not %s" % event)
+        if 'grid_display' in event.args:
+            self.robot.rrt.grid_display = event.args['grid_display']
+        event2 = PilotEvent(event.status)
+        event2.args = event.args
+        self.parent.post_event(event2)
+
+#---------------- PilotBase ----------------
+
+class PilotBase(StateNode):
+
+    """Base class for PilotToObject, PilotToPose, etc."""
+
+    class ClearDisplays(StateNode):
+        def start(self,event=None):
+            super().start()
+            if self.robot.path_viewer:
+                self.robot.path_viewer.clear()
+
+    class SendObject(StateNode):
+        def start(self,event=None):
+          super().start()
+          object = self.parent.object
+          #if object.pose_confidence < 0:
+          #   self.parent.post_event(PilotEvent(NotLocalized,object=object))
+          #   self.parent.post_failure()
+          #   return
+          self.post_data(self.parent.object)
+
+    class ReceivePlan(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            if not isinstance(event, DataEvent):
+                raise ValueError(event)
+            (navplan, grid_display) = event.data
+
+            self.robot.rrt.draw_path = navplan.extract_path()
+            #print('ReceivePlan: draw_path=', self.robot.world.rrt.draw_path)
+            self.robot.rrt.grid_display = grid_display
+            self.parent.navplan = navplan
+            self.post_data(navplan)
+
+    class PilotExecutePlan(StateNode):
+        def start(self, event=None):
+            if not self.parent.execute:
+                self.parent.post_completion()
+                return
+            if isinstance(event, DataEvent) and isinstance(event.data, NavPlan):
+                self.parent.navplan = event.data
+            self.navplan = self.parent.navplan
+            self.index = 0  # skip initial node which should match our pose
+            super().start(event)
+
+        class DispatchStep(StateNode):
+            def start(self, event=None):
+                super().start(event)
+                step = self.parent.navplan.steps[self.parent.index]
+                self.post_data(step.type)
+
+        class ExecuteDrive(StateNode):
+            class TurnStep(ActionNode):
+                def start(self,event=None):
+                    super().start(event)
+                    pose = self.robot.pose
+                    dest = self.parent.drive_steps[self.parent.index]
+                    print(f'ExecuteDrive: dest={dest}  pose={pose}')
+                    dx = dest.x - pose.x
+                    dy = dest.y - pose.y
+                    angle_rads = wrap_angle(atan2(dy,dx) - pose.theta)
+                    print(f'Pilot TurnStep turning by {angle_rads*180/pi : .1f} deg.')
+                    self.robot.actuators['drive'].turn(self, angle_rads)
+                    
+            class ForwardStep(ActionNode):
+                def start(self,event=None):
+                    super().start(event)
+                    pose = self.robot.pose
+                    dest = self.parent.drive_steps[self.parent.index]
+                    dx = dest.x - pose.x
+                    dy = dest.y - pose.y
+                    distance_mm = (dx**2 + dy**2) ** 0.5
+                    self.robot.actuators['drive'].forward(self,distance_mm)
+                    
+            class NextStep(StateNode):
+                def start(self,event=None):
+                    super().start(event)
+                    self.parent.index += 1
+                    if self.parent.index >= len(self.parent.drive_steps):
+                        self.post_completion()
+                    else:
+                        self.post_success()
+
+            def start(self, event=None):  # method of ExecutePlan
+                step = self.parent.navplan.steps[self.parent.index]
+                self.drive_steps = step.param
+                self.index = 0  # skip the first entry, which should be current pose
+                print('ExecutePlan steps=', self.drive_steps)
+                super().start(event)
+
+            $setup{
+                # PilotExecutePlan.ExecuteDrive machine
+                # We need separate turn and forward steps because turning
+                # while driving is not yet supported in aim.py.
+
+                next: self.NextStep()
+                next =C=> ParentCompletes()
+                next =S=> turn
+
+                turn: self.TurnStep() =C=> forward
+
+                forward: self.ForwardStep() =C=> next # Print('tm to continue drive...') =TM=> next
+
+            }
+
+        class ExecuteTurnTo(Turn):
+            def start(self, event):
+                step = self.parent.navplan.steps[self.parent.index]
+                target_heading = step.param
+                self.angle_deg = wrap_angle(target_heading - self.robot.pose.theta) * 180/pi
+                print(f'ExecuteTurnTo: target heading = {target_heading*180/pi:.1f} deg., ' +
+                      f'current heading = {self.robot.pose.theta*180/pi:.1f} deg., ' +
+                      f'turn angle = {self.angle_deg:.1f} .deg')
+                super().start(event)
+
+
+        class ExecuteDoorPass(StateNode):
+            """ Greasy hack to get around circular dependency between Pilot and DoorPass """
+            def start(self, event=None):
+                original_doorpass = self.children['doorpass']
+                print(f'{original_doorpass=}')
+                if not isinstance(original_doorpass, DoorPass):
+                    global pilot_global_doorpass_node  # set up in simple_cli
+                    new_doorpass = copy.copy(pilot_global_doorpass_node)
+                    print(f'{new_doorpass=}')
+                    new_doorpass.parent = original_doorpass.parent
+                    new_doorpass.transitions = original_doorpass.transitions
+                    for t in new_doorpass.transitions:
+                        t.sources = [new_doorpass]
+                    new_doorpass.children = dict()
+                    new_doorpass.setup()
+                    new_doorpass.start_node = new_doorpass.children[pilot_global_doorpass_node.start_node.name]
+                    self.children['doorpass'] = new_doorpass
+                    self.start_node = new_doorpass
+                    print(f'{new_doorpass=}')
+                step = self.parent.navplan.steps[self.parent.index]
+                self.children['doorpass'].door_spec = step.param
+                super().start()
+
+            $setup{
+                # PilotExecutePlan.ExecuteDoorPass machine
+                doorpass: StateNode()  # dummy to be replaced by start() due to circularity
+                doorpass =C=> ParentCompletes()
+                doorpass =F=> ParentFails()
+            }
+
+        class ExecuteBackup(Forward):
+            def start(self, event=None):
+                step = self.parent.navplan.steps[self.parent.index]
+                if len(step.param) > 1:
+                    print('***** WARNING: extra backup steps not being processed *****')
+                node = step.param[0]
+                dx = node.x - self.robot.pose.x
+                dy = node.y - self.robot.pose.y
+                self.distance_mm = - sqrt(dx*dx + dy*dy)
+                super().start(event)
+
+        class NextStep(StateNode):
+            def start(self, event=None):
+                super().start(event)
+                self.parent.index += 1
+                if self.parent.index < len(self.parent.navplan.steps):
+                    self.post_success()
+                else:
+                    self.post_completion()
+
+        $setup{
+            # PilotExecutePlan machine
+
+            dispatch: self.DispatchStep()
+            dispatch =D(NavStep.DRIVE)=> drive
+            dispatch =D(NavStep.TURN_TO)=> turn_to
+            dispatch =D(NavStep.DOORPASS)=> doorpass
+            dispatch =D(NavStep.BACKUP)=> backup
+
+            drive: self.ExecuteDrive()
+            drive =C=> next
+            drive =F=> ParentFails()
+
+            turn_to: self.ExecuteTurnTo()
+            turn_to =C=> next
+            turn_to =F=> ParentFails()
+
+            doorpass: self.ExecuteDoorPass()
+            doorpass =C=> next
+            doorpass =F=> ParentFails()
+
+            backup: self.ExecuteBackup()
+            backup =C=> next
+            backup =F=> ParentFails()
+
+            #next: Print('tm to continue...') =TM=> next2
+
+            next: self.NextStep()
+            next =S=> dispatch
+            next =C=> ParentCompletes()
+        }
+
+        # End of PilotExecutePlan
+    # End of PilotBase
+
+
+#---------------- PilotToObject ----------------
+
+class PilotToObject(PilotBase):
+    "Use the wavefront planner to navigate to a distant object."
+    def __init__(self, object_spec=None, execute=True):
+        super().__init__()
+        self.object_spec = object_spec
+        self.execute = execute
+
+    def start(self, event=None):
+        if isinstance(event,DataEvent):
+            if isinstance(event.data, WorldObject):
+                self.object = event.data
+                self.object_spec = None
+            elif isinstance(event.data, str) and event.data in self.robot.world_map.objects:
+                self.object_spec = event.data
+            else:
+                raise ValueError('DataEvent to PilotToObject must be a WorldObject or id string', event)
+        if isinstance(self.object_spec, WorldObject):
+            self.object = self.object_spec
+        elif isinstance(self.object_spec, str):
+            self.object = self.robot.world_map.objects[self.object_spec]
+        if not self.object:
+            raise ValueError('PilotToObject has no target object specified')
+        super().start(event)
+
+    class OrientToObject(TurnToward):
+        def start(self,event=None):
+            self.object_spec = self.parent.object
+            super().start(event)
+
+    class CenterTheObject(Turn):
+        DEGREES_PER_PIXEL = 0.0829
+        def start(self, event=None):
+            obj = self.parent.object
+            if obj.is_visible:
+                if hasattr(obj, 'spec'):   # aivision object
+                    spec = self.parent.object.spec
+                    pixel_error = self.robot.camera.center[0] - (spec['originx'] + spec['width']/2)*AIVISION_RESOLUTION_SCALE
+                elif hasattr(obj, 'marker'): # aruco marker
+                    center = np.mean(obj.marker.corners, axis=1)
+                    pixel_error = self.robot.camera.center[0] - center[0,0]
+                else:
+                    print(f"*** PilotToObject: don't know how to center {obj}")
+                    pixel_error = 0
+            else:
+                print('*** PilotToObject: target object not currently visible: cannot center it')
+                pixel_error = 0
+            self.angle_deg = pixel_error * self.DEGREES_PER_PIXEL
+            super().start(event)
+
+    class CheckArrival(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            pose = self.robot.pose
+            if True: # *** TODO: check if we've arrived at the target shape
+                self.post_success()
+            else:
+                self.post_failure()
+
+    $setup{
+        # PilotToObject machine
+
+        launch: self.ClearDisplays() =N=> self.SendObject() =D=> planner
+
+        #planner: PathPlannerProcess() =D=> recv
+        planner: PathPlanToObject() =D=> recv
+        planner =C=> ParentCompletes() # already close enough
+        planner =PILOT=> ParentPilotEvent() =N=> Print('Path planner failed')
+
+        recv: self.ReceivePlan() =D=> exec
+
+        exec: self.PilotExecutePlan()
+        exec =C=> StateNode() =T(1)=> check
+        exec =F=> ParentFails()
+
+        check: self.CheckArrival()
+        check =S=> orient
+        check =F=> Print("NavPlan failed to reach goal: trying again") =N=> planner
+
+        orient: self.OrientToObject() =C=> Print("Pilot OrientToObject completes") =T(0.5)=> center
+
+        center: self.CenterTheObject() =C=> Print("Pilot CenterTheObject completes") =N=> ParentCompletes()
+    }
+
+#---------------- PilotToPose ----------------
+
+class PilotToPose(PilotBase):
+    "Use the rrt path planner for short-range navigation to a specific pose."
+    def __init__(self, target_pose=None, verbose=False, max_iter=RRT.DEFAULT_MAX_ITER, execute=True):
+        super().__init__()
+        self.target_pose = target_pose
+        self.target_object = None
+        self.verbose = verbose
+        self.max_iter = max_iter
+        self.execute = execute
+
+    def start(self, event=None):
+        if isinstance(event, DataEvent):
+            if isinstance(event.data, WorldObject):
+                self.target_object = event.data
+                self.target_pose = copy.copy(event.data.pose)
+                self.target_pose.theta = nan
+            elif isinstance(event.data, Pose):
+                self.target_object = None
+                self.target_pose = event.data
+            else:
+                raise ValueError('Not a world object or pose:', event.data)
+        self.robot.rrt.max_iter = self.max_iter
+        super().start(event)
+
+    class PilotRRTPlanner(StateNode):
+        MIN_DISTANCE_THRESHOLD = 10 # mm
+
+        def start(self,event=None):
+            super().start(event)
+            tpose = self.parent.target_pose
+            if not isinstance(tpose,Pose) or (tpose.x == 0 and tpose.y == 0 and tpose.theta == 0):
+                print("Pilot: target pose is invalid: %s" % tpose)
+                self.parent.post_event(PilotEvent(InvalidPose, pose=tpose))
+                self.parent.post_failure()
+                return
+            if self.robot.particle_filter.state != ParticleFilter.LOCALIZED:
+                print('PilotRRTPlanner: Robot not localized!')
+                self.parent.post_event(PilotEvent(NotLocalized))
+                self.parent.post_failure()
+                return
+            pose = self.robot.pose
+            distance = sqrt((tpose.x - pose.x)**2 + (tpose.y - pose.y)**2)
+            if distance <= self.MIN_DISTANCE_THRESHOLD:
+                print(f'PilotRRTPlanner: distance {distance:.1f} mm already close enough')
+                self.post_completion()
+                return
+            else:
+                print(f'PilotRRTPlanner: {distance = :.1f} mm')
+            start_node = RRTNode(x=pose.x, y=pose.y, q=pose.theta)
+            goal_node = RRTNode(x=tpose.x, y=tpose.y, q=tpose.theta)
+
+            start_escape_move = None
+            try:
+                (treeA, treeB, path) = self.rrt_plan(start_node, goal_node)
+
+            except StartCollides as e:
+                # See if we can escape the start collision using canned headings.
+                # This could be made more sophisticated, e.g., using arcs.
+                #print('planner',e,'start',start_node)
+                escape_distance = 50 # mm
+                escape_headings = (0, +30/180.0*pi, -30/180.0*pi, pi, pi/2, -pi/2)
+                for phi in escape_headings:
+                    if phi != pi:
+                        new_q = wrap_angle(start_node.q + phi)
+                        d = escape_distance
+                    else:
+                        new_q = start_node.q
+                        d = -escape_distance
+                    new_start = RRTNode(x=start_node.x + d*cos(new_q),
+                                        y=start_node.y + d*sin(new_q),
+                                        q=new_q)
+                    # print('trying start escape', new_start)
+                    if not self.robot.rrt.collides(new_start):
+                        start_escape_move = (phi, start_node, new_start)
+                        start_node = new_start
+                        break
+                if start_escape_move is None:
+                    print('PilotRRTPlanner: Start collides!',e)
+                    self.parent.post_event(PilotEvent(StartCollides, args=e.args))
+                    self.parent.post_failure()
+                    return
+                try:
+                    (treeA, treeB, path) = self.rrt_plan(start_node, goal_node)
+                except GoalCollides as e:
+                    print('PilotRRTPlanner: Goal collides!',e)
+                    self.parent.post_event(PilotEvent(GoalCollides, args=e.args))
+                    self.parent.post_failure()
+                    return
+                except MaxIterations as e:
+                    print('PilotRRTPlanner: Max iterations %d exceeded!' % e.args[0])
+                    self.parent.post_event(PilotEvent(MaxIterations, args=e.args))
+                    self.parent.post_failure()
+                    return
+                #print('replan',path)
+
+            except GoalCollides as e:
+                print('PilotRRTPlanner: Goal collides!',e)
+                self.parent.post_event(PilotEvent(GoalCollides, args=e.args))
+                self.parent.post_failure()
+                return
+            except MaxIterations as e:
+                print('PilotRRTPlanner: Max iterations %d exceeded!' % e.args[0])
+                self.parent.post_event(PilotEvent(MaxIterations, args=e.args))
+                self.parent.post_failure()
+                return
+
+            if self.parent.verbose:
+                print('Path planner generated',len(treeA)+len(treeB),'nodes.')
+            if self.parent.robot.path_viewer:
+                self.parent.robot.path_viewer.add_tree(path, (1, 0, 0, 0.75))
+
+            self.robot.rrt.draw_path = path
+
+            # Construct the nav plan
+            if self.parent.verbose:
+                [print(' ',x) for x in path]
+
+            doors = self.robot.world_map.generate_doorway_list()
+            navplan = PathPlanner.from_path(path, doors)
+            print('navplan=',navplan, '   steps=',navplan.steps)
+
+            # Insert the StartCollides escape move if there is one
+            if start_escape_move:
+                phi, start, new_start = start_escape_move
+                if phi == pi:
+                    escape_step = NavStep(NavStep.BACKUP, [new_start])
+                    navplan.steps.insert(0, escape_step)
+                elif navplan.steps[0].type == NavStep.DRIVE:
+                    # Insert at the beginning the original start node we replaced with new_start
+                    navplan.steps[0].param.insert(0, start_node)
+                else:
+                    # Shouldn't get here, but just in case
+                    escape_step = NavStep(NavStep.DRIVE, (RRTNode(start.x,start.y), RRTNode(new_start.x,new_start.y)))
+                    navplan.steps.insert(0, escape_step)
+
+            #print('finalnavplan steps:', navplan.steps)
+
+            # If no doorpass, we're good to go
+            last_step = navplan.steps[-1]
+            grid_display = None
+            if last_step.type != NavStep.DOORPASS:
+                self.post_data((navplan,grid_display))
+                return
+
+            # We planned for a doorpass as the last step; replan to the outer gate.
+            door = last_step.param
+            last_node = navplan.steps[-2].param[-1]
+            gate, side = DoorPass.calculate_gate((last_node.x, last_node.y), door, DoorPass.OUTER_GATE_DISTANCE)
+            goal_node = RRTNode(x=gate[0], y=gate[1], q=gate[2])
+            print('new goal is', goal_node)
+            try:
+                (_, _, path) = self.rrt_plan(start_node, goal_node)
+            except Exception as e:
+                print('Pilot replanning for door gateway failed!', e.args)
+            navplan = PathPlanner.from_path(path, [])
+            navplan.steps.append(last_step)  # Add the doorpass step
+            self.post_data((navplan,grid_display))
+
+        def rrt_plan(self,start_node,goal_node):
+            self.robot.rrt.generate_obstacles(self.parent.target_object,
+                                              PathPlanner.skinny_obstacle_inflation,
+                                              PathPlanner.skinny_wall_inflation,
+                                              PathPlanner.skinny_doorway_adjustment)
+            return self.robot.rrt.plan_path(start_node, goal_node, goal_object=self.parent.target_object)
+
+        # ----- End of PilotRRTPlanner -----
+
+    class CheckArrival(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            pose_diff = self.robot.pose - self.parent.target_pose
+            distance = sqrt(pose_diff.x**2 + pose_diff.y**2)
+            print(f'{distance=}  {pose_diff=}')
+            MAX_TARGET_DISTANCE = 50.0 # mm
+            if distance <= MAX_TARGET_DISTANCE:
+                self.post_success()
+            else:
+                self.post_failure()
+
+
+    $setup{
+        # PilotToPose machine
+
+        launch: self.ClearDisplays() =N=> planner
+
+        planner: self.PilotRRTPlanner() =D=> recv
+        planner =C=> ParentCompletes()  # already close enough
+        planner =PILOT=> ParentPilotEvent() =N=> Print('Path planner failed')
+
+        recv: self.ReceivePlan() =D=> exec
+
+        exec: self.PilotExecutePlan()
+        exec =C=> check
+        exec =F=> ParentFails()
+
+        check: self.CheckArrival()
+        check =S=> ParentCompletes()
+        check =F=> planner
+    }
+
+
+class PilotPushToPose(PilotToPose):
+    def __init__(self,pose):
+        super().__init__(pose)
+        self.max_turn = 20*(pi/180)
+
+    def rrt_plan(self,start_node,goal_node):
+        self.robot.rrt.step_size=20
+        return self.robot.rrt.plan_push_chip(start_node,goal_node)
+
+
+class PilotFrustration(StateNode):
+
+    def __init__(self, text_template=None):
+        super().__init__()
+        self.text_template = text_template  # contains at most one '%s'
+
+    class SayObject(Say):
+        def start(self, event=None):
+            text_template = self.parent.text_template
+            try:
+                object_name = self.parent.parent.object.name   # for rooms
+            except:
+                try:
+                    object_name = self.parent.parent.object.id   # for cubes
+                except:
+                    object_name = None
+            if text_template is not None:
+                if '%' in text_template:
+                    self.text = text_template % object_name
+                else:
+                    self.text = text_template
+            elif object_name is not None:
+                self.text = 'Can\'t reach %s' % object_name
+            else:
+                self.text = 'stuck'
+            self.robot.rrt.text = self.text
+            super().start(event)
+
+
+    $setup{
+        launcher: AbortAllActions() =N=> {speak, turn}
+
+        speak: self.SayObject()
+
+        turn: StateNode() =RND=> {left, right}
+        left: Turn(5) =C=> left2: Turn(-5)
+        right: Turn(-5) =C=> right2: Turn(5)
+
+        {speak, left2, right2} =C(2)=> done
+
+        done: ParentCompletes()
+    }
+
+# ================ DoorPass ================
+
+pilot_global_doorpass_node = "Will be filled in by simple_cli due to circularity"
+
+class DoorPass(StateNode):
+    """Pass through a doorway. Assumes the doorway is nearby and unobstructed."""
+
+    OUTER_GATE_DISTANCE = 150 # mm
+    INNER_GATE_DISTANCE =  70 # mm -- currently unused
+
+    def __init__(self, door_spec=None):
+        self.door_spec = door_spec
+        super().__init__()
+
+    def start(self, event=None):
+        door_spec = self.door_spec
+        if isinstance(event,DataEvent):
+            door_spec = event.data
+        if isinstance(door_spec, int):
+            door_spec ='Doorway-%d:0.a' % door_spec
+        if isinstance(door_spec, str):
+            doorobj = self.robot.world_map.objects.get(door_spec)
+        elif isinstance(door_spec, DoorwayObj):
+            doorobj = door_spec
+        else:
+            doorobj = None
+        if isinstance(doorobj, DoorwayObj):
+            self.object = doorobj
+        else:
+            print("Error in DoorPass: no doorway named %s" % repr(door_spec))
+            self.punt_super_start()
+            self.post_failure()
+            return
+        super().start(event)
+
+
+    @staticmethod
+    def calculate_gate(start_point, door, offset):
+        """Returns closest gate point (gx, gy)"""
+        (rx,ry) = start_point
+        dx = door.pose.x
+        dy = door.pose.y
+        dtheta = door.pose.theta
+        # calculate gates on either side of the door, then pick the closest
+        pt1x = dx + offset * cos(dtheta)
+        pt1y = dy + offset * sin(dtheta)
+        pt2x = dx + offset * cos(dtheta+pi)
+        pt2y = dy + offset * sin(dtheta+pi)
+        dist1sq = (pt1x-rx)**2 + (pt1y-ry)**2
+        dist2sq = (pt2x-rx)**2 + (pt2y-ry)**2
+        if dist1sq < dist2sq:
+            side = +1  # we're on the front side of the wall
+            return (pt1x, pt1y, wrap_angle(dtheta+pi)), side
+        else:
+            side = -1  # we're on the back side of the wall
+            return (pt2x, pt2y, dtheta), side
+
+    class AwayFromCollide(Forward):
+        def start(self, event=None):
+            if isinstance(event,DataEvent):
+                startNode = event.data[0]
+                collideObj = event.data[1]
+                pose = self.robot.pose
+                (rx, ry, rtheta) = pose.x, pose.y, pose.theta
+                cx, cy = collideObj.center[0,0],collideObj.center[1,0]
+                ctheta = atan2(cy-ry, cx-rx)
+                delta_angle = wrap_angle(ctheta - rtheta)
+                delta_angle = delta_angle/pi*180
+                if -90 < delta_angle and delta_angle < 90:
+                    self.distance_mm = -40
+                else:
+                    self.distance_mm = 40
+                self.drive_speed = 50
+                super().start(event)
+            else:
+                raise ValueError('DataEvent to AwayFromCollide must be a StartCollides.args', event.data)
+                super().start(event)
+                self.post_failure()
+
+    class TravelToGate(PilotToPose):
+        def __init__(self,offset):
+            self.offset = offset
+            super().__init__()
+
+        def start(self,event=None):
+            pose = self.robot.pose
+            (rx, ry, rtheta) = pose.x, pose.y, pose.theta
+            (gate_x, gate_y, _), side = DoorPass.calculate_gate((rx,ry), self.parent.object, offset=self.offset)
+            self.parent.side = side
+            dpose = self.parent.object.pose
+            target_theta = dpose.theta if side == -1 else dpose.theta + pi
+            self.target_pose = Pose(gate_x, gate_y, theta=target_theta)
+            super().start()
+
+    class TurnToGate(Turn):
+        """Turn to the approach gate, or post success if we're already there."""
+        def __init__(self,offset):
+            self.offset = offset
+            super().__init__(turn_speed=45)
+
+        def start(self,event=None):
+            pose = self.robot.pose
+            (rx, ry, rtheta) = pose.x, pose.y, pose.theta
+            (gate_x, gate_y, _), side = DoorPass.calculate_gate((rx,ry), self.parent.object, offset=self.offset)
+            bearing = atan2(gate_y-ry, gate_x-rx)
+            turn = wrap_angle(bearing - rtheta)
+            print('^^ TurnToGate: gate=(%.1f, %.1f)  offset=%.1f rtheta=%.1f  bearing=%.1f  turn=%.1f' %
+                  (gate_x, gate_y, self.offset, rtheta*180/pi, bearing*180/pi, turn*180/pi))
+            MIN_TURN_ANGLE = 2.5 * (pi/180)
+            if abs(turn) < MIN_TURN_ANGLE:
+                self.angle_deg = 0
+                super().start(event)
+                self.post_completion()
+            else:
+                self.angle_deg = turn * 180/pi
+                super().start(event)
+
+
+    class ForwardToGate(Forward):
+        """Travel forward to reach the approach gate."""
+        def __init__(self,offset):
+            self.offset = offset
+            super().__init__()
+
+        def start(self,event=None):
+            rx = self.robot.pose.x
+            ry = self.robot.pose.y
+            (gate_x, gate_y, _), side = DoorPass.calculate_gate((rx,ry), self.parent.object, offset=self.offset)
+            self.distance_mm = sqrt((gate_x-rx)**2 + (gate_y-ry)**2)
+            self.drive_speed = 50
+            super().start(event)
+
+    class TurnToFaceWall(Turn):
+        def start(self,event=None):
+            robot_theta = self.robot.pose.theta
+            if self.parent.side == +1:
+                door_theta = self.parent.object.pose.theta +pi
+            else:
+                door_theta = self.parent.object.pose.theta
+            self.angle_deg = wrap_angle(door_theta - robot_theta) * 180/pi
+            super().start(event)
+
+    class CenterOnDoorway(Sideways):
+        def start(self, event=None):
+            door = self.parent.object
+            index = door.index
+            wall = door.wall
+            spec = wall.wall_spec
+            door_x = spec.doorways[index]['x']
+            side = self.parent.side
+            markers = [(num, spec['x']) for (num,spec) in spec.marker_specs.items()
+                       if spec['side'] == side]
+            lefts = [m for m in markers if m[1] < door_x]
+            left = max(lefts, key=lambda p : p[1])
+            rights = [m for m in markers if m[1] > door_x]
+            right = min(rights, key=lambda p: p[1])
+            print(f'left={lefts} left={left} rights={rights} right={right} door_x={door_x}')
+            seen_markers = self.robot.aruco_detector.seen_marker_objects
+            left_marker = seen_markers.get(left[0], None)
+            right_marker = seen_markers.get(right[0], None)
+            left_offset = left_marker.camera_coords[0] - (door_x - left[1]) if left_marker else None
+            right_offset = right_marker.camera_coords[0] - (door_x - right[1]) if right_marker else None
+            if left_offset and right_offset:
+                self.distance_mm = (left_offset + right_offset) / 2
+            elif left_offset:
+                print('DoorPass: right marker not visible!')
+                self.distance_mm = left_offset
+            elif right_offset:
+                print('DoorPass: left marker not visible!')
+                self.distance_mm = right_offset
+            else:
+                print('DoorPass: markers not visible!')
+                self.distance_mm = 0
+            print(f'offset = {self.distance_mm}')
+            super().start(event)
+
+    class CenterOnDoorway_Old(Sideways):
+        def start(self,event=None):
+            """Calculate the vector from the robot to the doorway and rotate it into the robot's
+            frame so the y component gives the sideways distance to line up with the door."""
+            # NOTE: since the robot won't be perfectly facing the door we should perhaps
+            # adjust theta to reflect that.
+            door_pose = self.parent.object.pose
+            robot_pose = self.robot.pose
+            dx = door_pose.x - robot_pose.x
+            dy = door_pose.y - robot_pose.y
+            vec = aboutZ(robot_pose.theta).dot(point(dx,dy))
+            self.distance_mm = vec[1,0]
+            print(f'dpose={door_pose} rpose={robot_pose} dx={dx:.1f} dy={dy:.1f}' +
+                  f' vec={vec[0,0]:.1f},{vec[1,0]:.1f} dist={self.distance_mm:.1f}')
+            super().start(event)
+        
+
+    class TurnToMarker(Turn):
+        """Use camera image and native pose to center the door marker."""
+        def start(self,event=None):
+            marker_ids = self.parent.object.marker_ids
+            marker = self.robot.aruco_detector.seen_marker_objects.get(marker_ids[0], None) or \
+                     self.robot.aruco_detector.seen_marker_objects.get(marker_ids[1], None)
+            if not marker:
+                self.angle_deg = 0
+                super().start(event)
+                print("TurnToMarker failed to find marker %s or %s!" % marker_ids)
+                self.post_failure()
+                return
+            else:
+                print('TurnToMarker saw marker', marker)
+            sensor_dist = marker.camera_distance
+            sensor_bearing = atan2(marker.camera_coords[0],
+                                   marker.camera_coords[2])
+            x = self.robot.pose.position.x
+            y = self.robot.pose.position.y
+            theta = self.robot.pose.rotation.angle_z.radians
+            direction = theta + sensor_bearing
+            dx = sensor_dist * cos(direction)
+            dy = sensor_dist * sin(direction)
+            turn = wrap_angle(atan2(dy,dx) - self.robot.pose.rotation.angle_z.radians)
+            if abs(turn) < 0.5*pi/180:
+                self.angle_deg = 0
+            else:
+                self.angle_deg = turn * 180/pi
+            print("TurnToMarker %s turning by %.1f degrees" % (self.name, self.angle.degrees))
+            super().start(event)
+
+    class DriveThrough(Forward):
+        """Travel forward to drive through the gate."""
+        def __init__(self):
+            super().__init__()
+
+        def start(self,event=None):
+            pose = self.robot.pose
+            (rx, ry, rtheta) = pose.x, pose.y, pose.theta
+            (gate_x, gate_y, gate_theta), side = DoorPass.calculate_gate((rx,ry), self.parent.object, offset=5)
+            dist = sqrt((gate_x-rx)**2 + (gate_y-ry)**2)
+            offset = 120
+            delta_theta = wrap_angle(rtheta-(gate_theta+pi/2))
+            delta_dist = abs(offset/sin(delta_theta))
+            dist += delta_dist
+            self.distance_mm = dist
+            self.drive_speed = 50
+            super().start(event)
+
+    $setup{
+        # DoorPass machine
+
+        check_start: PilotCheckStartDetail()
+        check_start =S=> travel_to_gate1 # turn_to_gate1
+        check_start =D=> away_from_collide
+        check_start =F=> Forward(-80) =C=> check_start2
+
+        travel_to_gate1: self.TravelToGate(DoorPass.OUTER_GATE_DISTANCE)
+        travel_to_gate1 =C=> travelwait: StateNode() =traveltimer:T(1)=> align_with_wall
+        travel_to_gate1 =PILOT=> ParentFails()        
+
+        align_with_wall: self.TurnToFaceWall() =C=>
+            Print('facing the wall') =T(1)=> center_on_doorway
+
+        center_on_doorway: self.CenterOnDoorway() =C=>
+            Print('centered on doorway') =C=> through_door
+
+        through_door: self.DriveThrough() =C=> ParentCompletes()
+
+        away_from_collide: self.AwayFromCollide() =C=> StateNode() =T(0.2)=> check_start2
+        away_from_collide =F=> travel_to_gate1
+
+        check_start2: PilotCheckStartDetail()
+        check_start2 =S=> travel_to_gate1
+        check_start2 =D=> away_from_collide2
+        check_start2 =F=> ParentFails()
+
+        away_from_collide2: self.AwayFromCollide() =C=> StateNode() =T(0.2)=> check_start3
+        away_from_collide2 =F=> check_start3
+
+        check_start3: PilotCheckStart()
+        check_start3 =S=> travel_to_gate1
+        check_start3 =F=> ParentFails()
+
+    }

@@ -1,0 +1,687 @@
+from math import pi, sin, cos, inf, asin, atan2, ceil
+import numpy as np
+import random
+import time
+import math
+from math import nan, isnan
+
+from .geometry import wrap_angle
+
+from .rrt_shapes import *
+from .worldmap import BarrelObj, SportsBallObj, AprilTagObj, ArucoMarkerObj, WallObj, DoorwayObj, RoomObj
+from .aruco import ARUCO_MARKER_SIZE
+
+# *** TODO: Collision checking needs to use opposite headings
+# for treeB nodes because robot is asymmetric.
+
+#---------------- RRTNode ----------------
+
+class RRTNode():
+    def __init__(self, parent=None, x=0, y=0, q=0, radius=None):
+        self.parent = parent
+        self.x = x
+        self.y = y
+        self.q = q
+        self.radius = radius  # arc radius
+
+    def copy(self):
+        return RRTNode(self.parent, self.x, self.y, self.q, self.radius)
+
+    def __repr__(self):
+        if self.q is None:
+            return '<RRTNode (%.1f, %.1f)>' % (self.x, self.y)
+        qtext = f'{self.q:.1f}' if not isnan(self.q) else 'nan'
+        if not self.parent:
+            return '<RRTNode (%.1f, %.1f)@%s deg>' % \
+                   (self.x, self.y, qtext)
+        elif self.radius is None:
+            return '<RRTNode line to (%.1f, %.1f)@%s deg>' % \
+                   (self.x, self.y, qtext)
+        else:
+            return '<RRTNode arc to (%.1f, %.1f)@%s deg, rad=%d>' % \
+                   (self.x, self.y, qtext, self.radius)
+
+
+#---------------- RRT Path Planner ----------------
+
+class RRTException(Exception):
+    def __str__(self):
+        return self.__repr__()
+
+class StartCollides(RRTException): pass
+class GoalCollides(RRTException): pass
+class MaxIterations(RRTException): pass
+class GoalUnreachable(RRTException): pass
+class NotLocalized(RRTException): pass
+
+class RRT():
+    DEFAULT_MAX_ITER = 2000
+
+    def __init__(self, robot=None, robot_parts=None, bbox=None,
+                 max_iter=DEFAULT_MAX_ITER, step_size=10, arc_radius=40,
+                 xy_tolsq=90, q_tol=5*pi/180,
+                 obstacles=[], auto_obstacles=False,
+                 bounds=(range(-500,500), range(-500,500))):
+        self.robot = robot
+        self.max_iter = max_iter
+        self.step_size = step_size
+        self.max_turn = pi
+        self.arc_radius = arc_radius
+        self.xy_tolsq = xy_tolsq
+        self.q_tol = q_tol
+        self.robot_parts = robot_parts if robot_parts is not None else self.make_robot_parts(robot)
+        self.bounds = bounds
+        self.obstacles = obstacles
+        self.auto_obstacles = auto_obstacles
+        self.treeA = []
+        self.treeB = []
+        self.start = None
+        self.goal = None
+        self.goal_obstacle = None
+        self.bbox = bbox
+        self.path = []
+        self.draw_path = []
+        self.grid_display = None  # *** HACK to display wavefront grid
+        self.text = None    # *** HACK to display unreachable text
+
+    REACHED = 'reached'
+    COLLISION = 'collision'
+    INTERPOLATE = 'interpolate'
+
+    def set_obstacles(self,obstacles):
+        self.obstacles = obstacles
+
+    def nearest_node(self, tree, target_node):
+        best_distance = inf
+        nearest = None
+        x = target_node.x
+        y = target_node.y
+        for this_node in tree:
+            distx = this_node.x - x
+            disty = this_node.y - y
+            distsq = distx*distx + disty*disty
+            if distsq < best_distance:
+                best_distance = distsq
+                nearest = this_node
+        return nearest
+
+    def random_node(self):
+        return RRTNode(x=random.choice(self.bounds[0]),
+                       y=random.choice(self.bounds[1]))
+
+    def extend(self, tree, target):
+        nearest = self.nearest_node(tree, target)
+        status, new_node = self.interpolate(nearest, target)
+        if status is not self.COLLISION:
+            tree.append(new_node)
+        return (status, new_node)
+
+    def interpolate(self, node, target):
+        dx = target.x - node.x
+        dy = target.y - node.y
+        distsq = dx*dx + dy*dy
+        q = atan2(dy,dx)
+        dq = wrap_angle(q - (node.q or 0))
+        if abs(dq) > self.max_turn:
+            dq = self.max_turn if dq > 0 else -self.max_turn
+            q = wrap_angle((node.q or 0) + dq)
+        if abs(dq) >= self.q_tol:
+            # Must be able to turn to the new heading without colliding
+            turn_dir = +1 if dq >= 0 else -1
+            q_inc = turn_dir * self.q_tol
+            while abs(q_inc - dq) > self.q_tol:
+                if self.collides(RRTNode(x=node.x, y=node.y, q=(node.q or 0)+q_inc)):
+                    return (self.COLLISION, None)
+                q_inc += turn_dir * self.q_tol
+        if distsq < self.xy_tolsq:
+            return (self.REACHED, RRTNode(parent=node, x=target.x, y=target.y,q=q))
+        xstep = self.step_size * cos(q)
+        ystep = self.step_size * sin(q)
+        new_node = RRTNode(parent=node, x=node.x+xstep, y=node.y+ystep, q=q)
+        if self.collides(new_node):
+            return (self.COLLISION, None)
+        else:
+            return (self.INTERPOLATE, new_node)
+
+    def robot_parts_to_node(self,node):
+        parts = []
+        for part in self.robot_parts:
+            tmat = geometry.aboutZ(part.orient)
+            tmat = geometry.translate(part.center[0,0], part.center[1,0]).dot(tmat)
+            tmat = geometry.aboutZ(node.q).dot(tmat)
+            tmat = geometry.translate(node.x, node.y).dot(tmat)
+            this_part = part.instantiate(tmat)
+            parts.append(this_part)
+        return parts
+
+    def collides(self, node):
+        for part in self.robot_parts_to_node(node):
+            for obstacle in self.obstacles:
+                if part.collides(obstacle):
+                    return obstacle
+        return False
+
+    def all_colliders(self, node):
+        result = []
+        for part in self.robot_parts_to_node(node):
+            for obstacle in self.obstacles:
+                if part.collides(obstacle):
+                    result.append(part)
+        return result
+
+    def plan_push_chip(self, start, goal, max_turn=20*(pi/180), arc_radius=40.):
+        return self.plan_path(start, goal, max_turn, arc_radius)
+
+    def plan_path(self, start, goal, goal_object=None, max_turn=pi, arc_radius=40):
+        self.max_turn = max_turn
+        self.arc_radius = arc_radius
+        if self.auto_obstacles:
+            obstacle_inflation = 5
+            doorway_adjustment = 20  # widen doorways for RRT
+            self.generate_obstacles(goal_object, obstacle_inflation, doorway_adjustment)
+        self.start = start
+        self.goal = goal
+
+        # Check for StartCollides
+        collider = self.collides(start)
+        if collider:
+            raise StartCollides(start,collider,collider.obstacle_id)
+        elif goal is None:
+            return
+
+        self.target_heading = goal.q
+        self.compute_bounding_box()
+
+        # Set up treeA with start node
+        treeA = [start.copy()]
+        self.treeA = treeA
+
+        # Set up treeB with goal node(s)
+        if not isnan(self.target_heading):
+            offset_x = goal.x
+            offset_y = goal.y
+            offset_goal = RRTNode(x=offset_x, y=offset_y, q=goal.q or 0)
+            collider = self.collides(offset_goal)
+            if collider:
+                raise GoalCollides(goal,collider,collider.obstacle_id)
+            treeB = [offset_goal]
+            self.treeB = treeB
+        else:  # target_heading is nan
+            treeB = [goal.copy()]
+            self.treeB = treeB
+            temp_goal = goal.copy()
+            offset_goal = goal.copy()
+            for theta in range(0,360,10):
+                q = theta/180*pi
+                step = self.step_size
+                temp_goal.x = goal.x + step*cos(q)
+                temp_goal.y = goal.y + step*sin(q)
+                temp_goal.q = wrap_angle(q+pi)
+                collider = self.collides(temp_goal)
+                if not collider:
+                    treeB.append(RRTNode(parent=treeB[0], x=temp_goal.x, y=temp_goal.y, q=temp_goal.q))
+            if len(treeB) == 1:
+                raise GoalCollides(goal,collider,collider.obstacle_id)
+
+        # Set bounds for search area
+        self.compute_world_bounds(start,goal)
+
+        # Grow the RRT until trees meet or max_iter exceeded
+        swapped = False
+        for i in range(self.max_iter):
+            r = self.random_node()
+            (status, new_node) = self.extend(treeA, r)
+            if status is not self.COLLISION:
+                (status, new_node) = self.extend(treeB, treeA[-1])
+                if status is self.REACHED:
+                    break
+            (treeA, treeB) = (treeB, treeA)
+            swapped = not swapped
+        # Search terminated. Check for success.
+        if swapped:
+            (treeA, treeB) = (treeB, treeA)
+        if status is self.REACHED:
+            return self.get_path(treeA, treeB)
+        else:
+            raise MaxIterations(self.max_iter)
+
+    def compute_world_bounds(self,start,goal):
+        print(f'{start=}  {goal=}')
+        xmin = min(start.x, goal.x)
+        xmax = max(start.x, goal.x)
+        ymin = min(start.y, goal.y)
+        ymax = max(start.y, goal.y)
+        for obst in self.obstacles:
+            if isinstance(obst,Circle):
+                xmin = min(xmin, obst.center[0][0] - obst.radius)
+                xmax = max(xmax, obst.center[0][0] + obst.radius)
+                ymin = min(ymin, obst.center[1][0] - obst.radius)
+                ymax = max(ymax, obst.center[1][0] + obst.radius)
+            else:
+                xmin = min(xmin, np.min(obst.vertices[0]))
+                xmax = max(xmax, np.max(obst.vertices[0]))
+                ymin = min(ymin, np.min(obst.vertices[1]))
+                ymax = max(ymax, np.max(obst.vertices[1]))
+        xmin = xmin - 500
+        xmax = xmax + 500
+        ymin = ymin - 500
+        ymax = ymax + 500
+        self.bounds = (range(int(xmin), int(xmax)), range(int(ymin), int(ymax)))
+
+    def get_path(self, treeA, treeB):
+        nodeA = treeA[-1]
+        pathA = [nodeA.copy()]
+        while nodeA.parent is not None:
+            nodeA = nodeA.parent
+            pathA.append(nodeA.copy())
+        pathA.reverse()
+        # treeB was built backwards from the goal, so headings
+        # need to be reversed
+        nodeB = treeB[-1]
+        prev_heading = wrap_angle(nodeB.q + pi)
+        if nodeB.parent is None:
+            pathB = [nodeB.copy()]
+        else:
+            pathB = []
+            while nodeB.parent is not None:
+                nodeB = nodeB.parent
+                (nodeB.q, prev_heading) = (prev_heading, wrap_angle((nodeB.q or 0) + pi))
+                if not isnan(nodeB.q):
+                    pathB.append(nodeB.copy())
+        (pathA,pathB) = self.join_paths(pathA,pathB)
+        self.path = pathA + pathB
+        self.smooth_path()
+        target_q = self.target_heading
+        if not isnan(target_q):
+            # Last nodes turn to desired final heading
+            last = self.path[-1]
+            goal = RRTNode(parent=last, x=self.goal.x, y=self.goal.y, q=target_q)
+            self.path.append(goal)
+        return (treeA, treeB, self.path)
+
+    def join_paths(self,pathA,pathB):
+        turn_angle = wrap_angle(pathB[0].q - pathA[-1].q)
+        if abs(turn_angle) <= self.max_turn:
+            return (pathA,pathB)
+        print('*** JOIN PATHS EXCEEDED MAX TURN ANGLE: ', turn_angle*180/pi)
+        return (pathA,pathB)
+
+    def smooth_path(self):
+        """Smooth a path by picking random subsequences and replacing
+        them with a direct link if there is no collision."""
+        smoothed_path = self.path
+        print('now smoothing path of length', len(smoothed_path))
+        for _ in range(0, 5*len(smoothed_path)):
+            L = len(smoothed_path)
+            if L <= 2: break
+            i = random.randrange(0,L-2)
+            cur_x = smoothed_path[i].x
+            cur_y = smoothed_path[i].y
+            cur_q = smoothed_path[i].q
+            j = random.randrange(i+2, L)
+            if j < L-1 and smoothed_path[j+1].radius != None:
+                continue  # j is parent node of an arc segment: don't touch
+            dx = smoothed_path[j].x - cur_x
+            dy = smoothed_path[j].y - cur_y
+            new_q = atan2(dy,dx)
+            dist = sqrt(dx**2 + dy**2)
+            turn_angle = wrap_angle(new_q - cur_q)
+            if abs(turn_angle) <= self.max_turn:
+                result = self.try_linear_smooth(smoothed_path,i,j,cur_x,cur_y,new_q,dist)
+                #print('linear smooth: length', len(result) if result else '--')
+            else:
+                result = self.try_arc_smooth(smoothed_path,i,j,cur_x,cur_y,cur_q)
+                #print('arc smooth: length', len(result) if result else '--')
+            smoothed_path = result or smoothed_path
+        self.path = smoothed_path
+        #print('final smoothed length', len(smoothed_path) if smoothed_path else '--')
+
+    def try_linear_smooth(self,smoothed_path,i,j,cur_x,cur_y,new_q,dist):
+        step_x = self.step_size * cos(new_q)
+        step_y = self.step_size * sin(new_q)
+        traveled = 0
+        while traveled < dist:
+            traveled += self.step_size
+            cur_x += step_x
+            cur_y += step_y
+            if self.collides(RRTNode(None, cur_x, cur_y, new_q)):
+                return None
+        # Since we're arriving at node j via a different heading than
+        # before, see if we need to add an arc to get us to node k=j+1
+        node_i = smoothed_path[i]
+        end_spec = self.calculate_end(smoothed_path, node_i, new_q, j)
+        if end_spec is None:
+            return None
+        # no collision, so snip out nodes i+1 ... j-1
+        #print('linear: stitching','%d:'%i,smoothed_path[i],'to %d:'%j,smoothed_path[j])
+        if not end_spec:
+            smoothed_path[j].parent = smoothed_path[i]
+            smoothed_path[j].q = new_q
+            smoothed_path[j].radius = None
+            smoothed_path = smoothed_path[:i+1] + smoothed_path[j:]
+        else:
+            (next_node,turn_node) = end_spec
+            smoothed_path[j+1].parent = turn_node
+            smoothed_path = smoothed_path[:i+1] + \
+                            [next_node, turn_node] + \
+                            smoothed_path[j+1:]
+        return smoothed_path
+
+    def try_arc_smooth(self,smoothed_path,i,j,cur_x,cur_y,cur_q):
+        if j == i+2 and smoothed_path[i+1].radius != None:
+            return None  # would be replacing an arc node with itself
+        arc_spec = self.calculate_arc(smoothed_path[i], smoothed_path[j])
+        if arc_spec is None:
+            return None
+        (tang_x, tang_y, tang_q, radius) = arc_spec
+        ni = smoothed_path[i]
+        turn_node1 = RRTNode(ni, tang_x, tang_y, tang_q, radius=radius)
+        # Since we're arriving at node j via a different heading than
+        # before, see if we need to add an arc at the end to allow us
+        # to smoothly proceed to node k=j+1
+        end_spec = self.calculate_end(smoothed_path, turn_node1, tang_q, j)
+        if end_spec is None:
+            return None
+        # no collision, so snip out nodes i+1 ... j-1 and insert new node(s)
+        # print('arc: stitching','%d:'%i,smoothed_path[i],'to %d:'%j,smoothed_path[j])
+        if not end_spec:
+            smoothed_path[j].parent = turn_node1
+            smoothed_path[j].q = tang_q
+            smoothed_path[j].radius = None
+            smoothed_path = smoothed_path[:i+1] + [turn_node1] + smoothed_path[j:]
+        else:
+            (next_node, turn_node2) = end_spec
+            smoothed_path[j+1].parent = turn_node2
+            smoothed_path = smoothed_path[:i+1] + \
+                            [turn_node1, next_node, turn_node2] + \
+                            smoothed_path[j+1:]
+        return smoothed_path
+
+    def calculate_arc(self, node_i, node_j):
+        # Compute arc node parameters to get us on a heading toward node_j.
+        cur_x = node_i.x
+        cur_y = node_i.y
+        cur_q = node_i.q
+        dest_x = node_j.x
+        dest_y = node_j.y
+        direct_turn_angle = wrap_angle(atan2(dest_y-cur_y, dest_x-cur_x) - cur_q)
+        # find center of arc we'll be moving along
+        dir = +1 if direct_turn_angle >=0 else -1
+        cx = cur_x + self.arc_radius * cos(cur_q + dir*pi/2)
+        cy = cur_y + self.arc_radius * sin(cur_q + dir*pi/2)
+        dx = cx - dest_x
+        dy = cy - dest_y
+        center_dist = sqrt(dx*dx + dy*dy)
+        if center_dist < self.arc_radius:  # turn would be too wide: punt
+            return None
+        # tangent points on arc: outer tangent formula from Wikipedia with r=0
+        gamma = atan2(dy, dx)
+        beta = asin(self.arc_radius / center_dist)
+        alpha1 = gamma + beta
+        tang_x1 = cx + self.arc_radius * cos(alpha1 + pi/2)
+        tang_y1 = cy + self.arc_radius * sin(alpha1 + pi/2)
+        tang_q1 = (atan2(tang_y1-cy, tang_x1-cx) + dir*pi/2)
+        turn1 = tang_q1 - cur_q
+        if dir * turn1 < 0:
+            turn1 += dir * 2 * pi
+        alpha2 = gamma - beta
+        tang_x2 = cx + self.arc_radius * cos(alpha2 - pi/2)
+        tang_y2 = cy + self.arc_radius * sin(alpha2 - pi/2)
+        tang_q2 = (atan2(tang_y2-cy, tang_x2-cx) + dir*pi/2)
+        turn2 = tang_q2 - cur_q
+        if dir * turn2 < 0:
+            turn2 += dir * 2 * pi
+        # Correct tangent point has shortest turn.
+        if abs(turn1) < abs(turn2):
+            (tang_x,tang_y,tang_q,turn) = (tang_x1,tang_y1,tang_q1,turn1)
+        else:
+            (tang_x,tang_y,tang_q,turn) = (tang_x2,tang_y2,tang_q2,turn2)
+        # Interpolate along the arc and check for collision.
+        q_traveled = 0
+        while abs(q_traveled) < abs(turn):
+            cur_x = cx + self.arc_radius * cos(cur_q + q_traveled)
+            cur_y = cy + self.arc_radius * sin(cur_q + q_traveled)
+            if self.collides(RRTNode(None, cur_x, cur_y, cur_q+q_traveled)):
+                return None
+            q_traveled += dir * self.q_tol
+        # Now interpolate from the tangent point to the target.
+        cur_x = tang_x
+        cur_y = tang_y
+        dx = dest_x - cur_x
+        dy = dest_y - cur_y
+        new_q = atan2(dy, dx)
+        dist = sqrt(dx*dx + dy*dy)
+        step_x = self.step_size * cos(new_q)
+        step_y = self.step_size * sin(new_q)
+        traveled = 0
+        while traveled < dist:
+            traveled += self.step_size
+            cur_x += step_x
+            cur_y += step_y
+            if self.collides(RRTNode(None, cur_x, cur_y, new_q)):
+                return None
+        # No collision, so arc is good.
+        return (tang_x, tang_y, tang_q, dir*self.arc_radius)
+
+    def calculate_end(self, smoothed_path, parent, new_q, j):
+        # Return False if arc not needed, None if arc not possible,
+        # or pair of new nodes if arc is required.
+        if  j == len(smoothed_path)-1:
+            return False
+        node_j = smoothed_path[j]
+        node_k = smoothed_path[j+1]
+        next_turn = wrap_angle(node_k.q - new_q)
+        if abs(next_turn) <= self.max_turn:
+            return False
+        dist = sqrt((node_k.x-node_j.x)**2 + (node_k.y-node_j.y)**2)
+        if False and dist < self.arc_radius:
+            return None
+        next_x = node_j.x - self.arc_radius * cos(new_q)
+        next_y = node_j.y - self.arc_radius * sin(new_q)
+        next_node = RRTNode(parent, next_x, next_y, new_q)
+        arc_spec = self.calculate_arc(next_node, node_k)
+        if arc_spec is None:
+            return None
+        (tang_x, tang_y, tang_q, radius) = arc_spec
+        turn_node = RRTNode(next_node, tang_x, tang_y, tang_q, radius=radius)
+        return (next_node, turn_node)
+
+    def coords_to_path(self, coords_pairs):
+        """
+        Transform a path of coordinates pairs to RRTNodes.
+        """
+        path = []
+        for (x,y) in coords_pairs:
+            node = RRTNode(x=x, y=y, q=None)
+            if path:
+                node.parent = path[-1]
+                path[-1].q = atan2(y - path[-1].y, x - path[-1].x)
+            path.append(node)
+        if path[-1].parent is not None:
+            path[-1].q = path[-1].parent.q
+        else:
+            path[-1].q = 0
+        return path
+
+
+    #---------------- Obstacle Representation ----------------
+
+    def generate_obstacles(self, goal_object,
+                           obstacle_inflation=0, wall_inflation=0, doorway_adjustment=0):
+        #self.robot.world.world_map.update_map()
+        self.goal_obstacle = None
+        obstacles = []
+        for obj in self.robot.world_map.objects.values():
+            if (not obj.is_obstacle) or obj.is_missing or (self.robot.holding is obj):
+                continue
+            if isinstance(obj, BarrelObj):
+                obst = self.generate_barrel_obstacle(obj, obstacle_inflation)
+            elif isinstance(obj, SportsBallObj):
+                obst = self.generate_ball_obstacle(obj, obstacle_inflation)
+            elif isinstance(obj, AprilTagObj):
+                obst = self.generate_apriltag_obstacle(obj, obstacle_inflation)
+            elif isinstance(obj, WallObj):
+                obsts = self.generate_wall_obstacles(obj, obstacle_inflation, doorway_adjustment)
+                obstacles += obsts
+                obst = None
+            elif isinstance(obj, ArucoMarkerObj):
+                obst = self.generate_aruco_obstacle(obj, obstacle_inflation)
+            elif isinstance(obj, DoorwayObj):
+                obst = None
+            else:
+                print("*** Can't generate obstacle for", obj)
+                obst = None
+                """
+            elif isinstance(obj, CustomMarkerObj):
+                obstacles.append(self.generate_marker_obstacle(obj,obstacle_inflation))
+            elif isinstance(obj, ChipObj):
+                obstacles.append(self.generate_chip_obstacle(obj,obstacle_inflation))
+            elif isinstance(obj, RobotForeignObj):
+                obstacles.append(self.generate_foreign_obstacle(obj))
+            """
+            if obj is goal_object:
+                self.goal_obstacle = obst
+            elif obst is not None:
+                obstacles.append(obst)
+        #print('generate_obstacles returned', obstacles)
+        self.obstacles = obstacles
+
+    @staticmethod
+    def generate_wall_obstacles(wall, wall_inflation, doorway_adjustment):
+        wall_spec = wall.wall_spec
+        wall_half_length = wall_spec.length / 2
+        widths = []
+        edges = [ [0, -wall_half_length - wall_inflation, 0., 1.] ]
+        last_x = -wall_half_length - wall_inflation
+        for door_spec in wall_spec.doorways.values():
+            door_center = door_spec['x']
+            door_width = door_spec['width'] + doorway_adjustment  # widen doorways for RRT, narrow for WaveFront
+            left_edge = door_center - door_width/2 - wall_half_length
+            edges.append([0., left_edge, 0., 1.])
+            widths.append(left_edge - last_x)
+            right_edge = door_center + door_width/2 - wall_half_length
+            edges.append([0., right_edge, 0., 1.])
+            last_x = right_edge
+        edges.append([0., wall_half_length + wall_inflation, 0., 1.])
+        widths.append(wall_half_length + wall_inflation - last_x)
+        edges = np.array(edges).T
+        edges = geometry.aboutZ(wall.pose.theta).dot(edges)
+        edges = geometry.translate(wall.pose.x, wall.pose.y).dot(edges)
+        obst = []
+        for i in range(0,len(widths)):
+            center = edges[:,2*i:2*i+2].mean(1).reshape(4,1)
+            dimensions=(4.0+2*wall_inflation, widths[i])
+            r = Rectangle(center=center,
+                          dimensions=dimensions,
+                          orient=wall.pose.theta )
+            r.obstacle_id = wall.id
+            obst.append(r)
+        return obst
+
+    @staticmethod
+    def generate_barrel_obstacle(barrel, inflation=0):
+        s = Circle(center=geometry.point(barrel.pose.x, barrel.pose.y),
+                   radius = barrel.diameter/2 + inflation)
+        s.obstacle_id = barrel.id
+        return s
+
+    @staticmethod
+    def generate_doorway_obstacle(doorway, inflation=0):
+        DOORWAY_THICKNESS = 5
+        s = Rectangle(center=geometry.point(doorway.pose.x, doorway.pose.y),
+                      dimensions=[doorway.door_width+2*inflation, DOORWAY_THICKNESS+2*inflation],
+                      orient=doorway.pose.theta)
+        s.obstacle_id = doorway.id
+        return s
+
+    @staticmethod
+    def generate_ball_obstacle(ball, inflation=0):
+        s = Circle(center=geometry.point(ball.pose.x, ball.pose.y),
+                   radius = ball.diameter/2 + inflation)
+        s.obstacle_id = ball.id
+        return s
+
+    @staticmethod
+    def generate_aruco_obstacle(aruco, inflation=0):
+        r = Rectangle(center=geometry.point(aruco.pose.x, aruco.pose.y),
+                      dimensions=[5+inflation, ARUCO_MARKER_SIZE+inflation],
+                      orient=aruco.pose.theta)
+        r.obstacle_id = aruco.id
+        return r
+
+    @staticmethod
+    def generate_apriltag_obstacle(apriltag, inflation=0):
+        r = Rectangle(center=geometry.point(apriltag.pose.x, apriltag.pose.y),
+                      dimensions=[apriltag.base_diameter+2*inflation, apriltag.width+2*inflation],
+                      orient=apriltag.pose.theta)
+        r.obstacle_id = apriltag.id
+        return r
+
+    @staticmethod
+    def generate_marker_obstacle(obj, inflation=0):
+        sx,sy,sz = obj.size
+        r = Rectangle(center=geometry.point(obj.x+sx/2, obj.y),
+                      dimensions=(sx+2*inflation,sy+2*inflation),
+                      orient=obj.theta)
+        r.obstacle_id = obj.id
+        return r
+
+    @staticmethod
+    def generate_room_obstacle(obj):
+        """Rooms aren't really obstacles, but this is used by PathPlanner to encode goal locations."""
+        r = Polygon(vertices=obj.points)
+        r.obstacle_id = obj.id
+        return r
+
+    @staticmethod
+    def generate_chip_obstacle(obj, inflation=0):
+        r = Circle(center = geometry.point(obj.x,obj.y),
+                   radius= obj.radius + inflation)
+        r.obstacle_id = obj.id
+        return r
+
+    @staticmethod
+    def generate_foreign_obstacle(obj):
+        r = Rectangle(center=geometry.point(obj.x, obj.y),
+                      dimensions=(obj.size[0:2]),
+                      orient=obj.theta)
+        r.obstacle_id = obj.id
+        return r
+
+    @staticmethod
+    def generate_mapFace_obstacle(obj, inflation=0):
+        r = Rectangle(center=geometry.point(obj.x,obj.y),
+                      dimensions=[obj.size[0]+2*inflation, obj.size[1]+2*inflation])
+        r.obstacle_id = obj.id
+        return r
+
+    @staticmethod
+    def make_robot_parts(robot):
+        result = []
+        for joint in robot.kine.joints.values():
+            if joint.collision_model:
+                tmat = robot.kine.link_to_base(joint)
+                robot_obst = joint.collision_model.instantiate(tmat)
+                result.append(robot_obst)
+        return result
+
+    def compute_bounding_box(self):
+        xmin = self.robot.pose.x
+        ymin = self.robot.pose.y
+        xmax = xmin
+        ymax = ymin
+        objs =  self.robot.world_map.objects.values()
+        # Rooms and Aruco markers aren't obstacles, so compute them separately.
+        rooms = [self.generate_room_obstacle(obj) for obj in objs if isinstance(obj, RoomObj)]
+        arucos = [self.generate_aruco_obstacle(obj, inflation=0) for obj in objs if isinstance(obj, ArucoMarkerObj)]
+        non_obstacles = rooms + arucos
+        # Objects may not be obstacles if they are goal locations, so include them again.
+        goals = [self.goal_obstacle] if self.goal_obstacle else []
+        for shape in self.obstacles +  non_obstacles + goals:
+            ((x0,y0),(x1,y1)) = shape.get_bounding_box()
+            xmin = min(xmin, x0)
+            ymin = min(ymin, y0)
+            xmax = max(xmax, x1)
+            ymax = max(ymax, y1)
+        self.bbox = ((xmin,ymin), (xmax,ymax))
+        return self.bbox

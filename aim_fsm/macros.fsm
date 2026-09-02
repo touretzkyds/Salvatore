@@ -1,0 +1,165 @@
+import random
+
+import vex
+
+from .nodes import *
+from .transitions import *
+
+#---------------- Emotion Macros from VEXCode ----------------
+
+class ActHappy(ActionNode):
+    $setup{
+        ShowEmoji(vex.EmojiType.HAPPY)                                =T(0.5)=>
+	PlaySound(vex.SoundType.ACT_HAPPY)                            =T(0.115)=>
+        
+        ShowEmoji(vex.EmojiType.HAPPY, vex.EmojiLookType.LOOK_RIGHT)  =N=>
+	Glow(vex.Color.YELLOW)                                        =N=>
+        Turn(-4, 100)                                                 =C=>
+	Glow(vex.Color.WHITE)                                         =N=>
+        ShowEmoji(vex.EmojiType.HAPPY, vex.EmojiLookType.LOOK_LEFT)   =N=>
+        Turn(8, 100)                                                  =C=>
+	Glow(vex.Color.YELLOW)                                        =N=>
+        ShowEmoji(vex.EmojiType.HAPPY, vex.EmojiLookType.LOOK_RIGHT)  =N=>
+        Turn(-4, 100)                                                 =C=>
+	StateNode()                                                   =T(0.1)=> loop
+
+        loop: Iterate(3)
+	loop                                                          =D=> 
+          ShowEmoji(vex.EmojiType.QUIET)                              =N=>
+  	  Glow(vex.Color.WHITE)                                       =N=>
+          MoveFor(1, 90)                                              =C=>
+          ShowEmoji(vex.EmojiType.HAPPY)                              =N=>
+          Glow(vex.Color.YELLOW)                                      =N=>
+          MoveFor(1, -90)                                             =CNext=> loop
+	loop =C=> finish
+
+        finish: Glow(vex.Color.TRANSPARENT)                           =T(0.5)=>
+	ShowEmoji()                                                   =N=>
+	ParentCompletes()
+
+    }
+
+
+class ActSad(ActionNode):
+    $setup{
+        ShowEmoji(vex.EmojiType.SAD)                                  =T(0.5)=>
+	PlaySound(vex.SoundType.ACT_SAD)                              =T(0.115)=>
+
+	Glow(vex.LightType.ALL_LEDS, 0, 0, 250)                       =N=>
+        ShowEmoji(vex.EmojiType.SAD, vex.EmojiLookType.LOOK_RIGHT)    =N=>
+        MoveFor(11, -135, 70)                                         =C=>
+
+	Glow(vex.LightType.ALL_LEDS, 0, 0, 100)                       =N=>
+        ShowEmoji(vex.EmojiType.SAD, vex.EmojiLookType.LOOK_FORWARD)  =N=>
+        MoveFor(11, -315, 70)                                         =C=>
+
+	Glow(vex.LightType.ALL_LEDS, 0, 0, 50)                        =N=>
+        ShowEmoji(vex.EmojiType.SAD, vex.EmojiLookType.LOOK_LEFT)     =N=>
+        MoveFor(11, 225, 70)                                          =C=>
+
+	Glow(vex.LightType.ALL_LEDS, 0, 0, 10)                        =N=>
+        ShowEmoji(vex.EmojiType.SAD, vex.EmojiLookType.LOOK_FORWARD)  =N=>
+        MoveFor(11, -45, 70)                                          =C=>
+
+        StateNode()                                                   =T(0.5)=>
+        Glow(vex.LightType.ALL_LEDS, vex.Color.TRANSPARENT)           =N=>
+        ShowEmoji()                                                   =N=>
+        ParentCompletes()
+    }
+
+
+class ActSilly(ActionNode):
+    class RandomStream(StateNode):
+        class RandomLEDs(Glow):
+            def start(self, event=None):
+                color_list = [vex.Color.BLUE, vex.Color.CYAN, vex.Color.GREEN, vex.Color.ORANGE,
+                              vex.Color.PURPLE, vex.Color.RED, vex.Color.WHITE, vex.Color.YELLOW]
+                self.args = [vex.LightType.ALL_LEDS, random.choice(color_list)]
+                super().start(event)
+
+        class RandomEmoji(ShowEmoji):
+            def start(self, event=None):
+                emoji_list = [vex.EmojiType.SILLY, vex.EmojiType.HAPPY, vex.EmojiType.EXCITED,
+                              vex.EmojiType.PROUD, vex.EmojiType.THRILLED, vex.EmojiType.LAUGHING]
+                self.emoji = random.choice(emoji_list)
+                super().start(event)
+
+        $setup{  # RandomStream
+            start: ShowEmoji(vex.EmojiType.SILLY) =N=>
+                self.RandomLEDs() =T(0.110)=>
+                   self.RandomEmoji() =T(0.110)=> start
+        }
+
+    $setup{
+        ShowEmoji(vex.EmojiType.HAPPY)                                =T(0.5)=>
+	PlaySound(vex.SoundType.ACT_HAPPY)                            =T(0.115)=>
+        
+        StateNode() =N=> {turn, random_stream, turn}
+
+        turn: Turn(-360,300)
+        random_stream: self.RandomStream()
+
+        {turn, random_stream} =C(1)=> finish
+
+        finish: ShowEmoji(vex.EmojiType.SILLY)                        =N=>
+          Glow(vex.LightType.ALL_LEDS, vex.Color.TRANSPARENT)         =N=>
+            ShowEmoji()                                               =N=>
+            ParentCompletes()
+    }
+
+
+class ActAngry(ActionNode):
+    $setup{
+        ShowEmoji(vex.EmojiType.ANGRY)                                =T(0.5)=>
+	PlaySound(vex.SoundType.ACT_ANGRY)                            =T(0.115)=>
+
+        Glow(vex.LightType.ALL_LEDS, vex.Color.RED)                   =N=>
+        MoveFor(25, 0, 50)                                            =C=>
+        StateNode()                                                   =T(0.5)=> loop
+
+        loop: Iterate(5)
+        loop                                                          =D=>
+          ShowEmoji(vex.EmojiType.ANNOYED)                            =N=>
+          MoveFor(5, 180, 50)                                         =C=>
+          ShowEmoji(vex.EmojiType.ANGRY)                              =T(0.05)=>
+          StateNode()                                                 =Next=> loop
+        loop =C=> finish
+
+        finish: StateNode()                                           =T(0.5)=>
+        Glow(vex.LightType.ALL_LEDS, vex.Color.TRANSPARENT)           =N=>
+        ShowEmoji()                                                   =N=>
+        ParentCompletes()
+    }
+
+
+class ActExcited(ActionNode):
+    class ExcitedStep(Turn):
+        def start(self,event):
+            angle = event.data
+            leds_actuator = self.robot.actuators['leds']
+            if angle < 0:
+                look_direction = vex.EmojiLookType.LOOK_RIGHT
+                orange_leds = [vex.LightType.LED4, vex.LightType.LED5, vex.LightType.LED6]
+            else:
+                look_direction = vex.EmojiLookType.LOOK_LEFT
+                orange_leds = [vex.LightType.LED1, vex.LightType.LED2, vex.LightType.LED3]
+            self.robot.actuators['display'].show_emoji(self, vex.EmojiType.EXCITED, look_direction)
+            leds_actuator.set_light_color(self, vex.LightType.ALL_LEDS, vex.Color.TRANSPARENT)
+            for ol in orange_leds:
+                leds_actuator.set_light_color(self, ol, vex.Color.ORANGE)
+            super().start(event)
+
+    $setup{
+        ShowEmoji(vex.EmojiType.EXCITED)                              =T(0.5)=>
+	PlaySound(vex.SoundType.ACT_EXCITED)                          =T(0.115)=>
+
+        loop: Iterate([-3, 3, -2, 2, -2, 2, -2, 2, -1, 1])
+        loop =D=> self.ExcitedStep() =CNext=> loop
+        loop =C=> finish
+
+        finish: ShowEmoji(vex.EmojiType.EXCITED)                      =N=>
+        Glow(vex.Color.TRANSPARENT)                                   =N=>
+        StateNode()                                                   =T(0.5)=>
+        ShowEmoji()                                                   =N=>
+        ParentCompletes()        
+    }

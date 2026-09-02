@@ -1,0 +1,115 @@
+from .nodes import *
+from .transitions import *
+from .pilot import *
+from .rrt import StartCollides, GoalCollides
+
+class CheckHolding(StateNode):
+    def start(self,event=None):
+        super().start(event)
+        if self.robot.holding is not None:
+            self.post_success()
+        else:
+            self.post_failure()
+
+class ClearHolding(StateNode):
+    def start(self,event=None):
+        super().start(event)
+        held_obj = self.robot.holding
+        if held_obj:
+            held_obj.held_by = None
+            self.robot.holding = None
+
+class PickUp(ActionNode,ObjectSpecNode):
+    def __init__(self, object_spec=None):
+        super().__init__()
+        self.object_spec = object_spec
+
+    def start(self,event=None):
+        if isinstance(event, DataEvent):
+            spec = event.data
+        else:
+            spec = self.object_spec
+        self.object = self.get_object_from_spec(spec)
+        super().start(event)
+        print('PickUp', self.object)
+        if self.object is None:
+            self.post_failure()
+
+    class SetHolding(StateNode):
+        def start(self,event=None):
+            super().start(event)
+            if self.robot.robot0.has_any_barrel() or self.robot.robot0.has_sports_ball():
+                self.robot.holding = self.parent.object
+                self.parent.object.held_by = self.robot
+                print('Robot has picked up', self.parent.object)
+                self.post_completion()
+            else:
+                print('Failed to pick up', self.parent.object)
+                self.post_failure()
+
+    class Pickup_PilotToObject(PilotToObject):
+        def start(self,event=None):
+            self.object = self.parent.object
+            super().start(event)
+
+    class Pickup_Forward(Forward):
+        def start(self, event=None):
+            if self.parent.object.is_visible:
+                robot_radius = self.robot.kine.body_diameter / 2
+                object_radius = getattr(self.parent.object, 'diameter', 0) / 2
+                dx = self.parent.object.pose.x - self.robot.pose.x
+                dy = self.parent.object.pose.y - self.robot.pose.y
+                print(f'{dx=:.1f} {dy=:.1f} {sqrt(dx**2 + dy**2)=:.1f}')
+                self.distance_mm = sqrt(dx**2 + dy**2) - robot_radius - object_radius + 25
+                print(f'Pickup_Forward: robot moving {self.distance_mm :0.1f} mm from {self.robot.pose} to {self.parent.object.pose}')
+            else:
+                self.distance_mm = 35
+                print(f'Pickup_Forward: robot moving blind {self.distance_mm :0.1f} mm from {self.robot.pose}')
+            super().start(event)
+
+    $setup{
+        # Pickup machine:
+        #   check StartCollides
+        #   drop object if carrying
+        #   path plan to object (PilotToObject)
+        #   check object is visible; fail if not
+        #   pick up
+        #   verify object held
+
+        check_start: PilotCheckStart()
+        check_start =S=> check_holding
+        check_start =F=> Print("Start collides!") =N=> Forward(-50) =C=> check_holding
+
+        check_holding: CheckHolding()
+        check_holding =F=> plan
+        check_holding =S=> Drop() =C=> plan
+
+        plan: self.Pickup_PilotToObject()
+        plan =C=> forward
+        plan =PILOT(GoalCollides)=> ParentPilotEvent()
+
+        forward: self.Pickup_Forward()
+        forward =C=> StateNode() =T(0.5)=> set_hold
+        forward =F=> ParentFails()
+
+        set_hold: self.SetHolding()
+        set_hold =C=> ParentCompletes()
+        set_hold =F=> ParentFails()
+        }
+
+################ Drop ################
+
+class Drop(StateNode):
+    $setup{
+        check: CheckHolding()
+        check =F=> ParentFails()
+        check =S=> kick
+
+
+        kick: PlaceKick() =C=> ClearHolding() =N=> look
+
+        # 1 second delay to give vision time to register the object
+        look: StateNode() =T(1)=> done
+
+        done: ParentCompletes()
+    }

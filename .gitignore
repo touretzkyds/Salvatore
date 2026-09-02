@@ -216,3 +216,29 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------
+# Salvatore project-specific
+# ---------------------------------------------------------------
+
+# Framework scratch files (from vex-aim-tools base)
+*~
+notes.txt
+snapshots/
+*.py.old
+.DS_Store
+
+# Model weights: never commit. See weights/README.md for how to obtain them.
+*.pt
+*.pth
+*.onnx
+
+# OpenAI conversation logs written by aim_fsm/openai_client.py
+logs/
+
+# Secrets
+.env
+
+# Local virtualenvs (including named variants like .venv-test)
+.venv*/
+venv*/
