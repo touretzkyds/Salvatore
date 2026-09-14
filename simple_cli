@@ -28,6 +28,8 @@ from importlib import __import__, reload
 from pathlib import Path
 from queue import Empty, SimpleQueue
 
+_QT_APP = None
+
 def _bootstrap_qt():
     """Load this venv's Qt platform plugin before anything else can break it.
 
@@ -38,10 +40,16 @@ def _bootstrap_qt():
        (e.g. Celeste), which points Qt at the wrong ``libqcocoa.dylib``.
     2. Importing torch / ultralytics / a Qt-backed matplotlib *before* the
        QGuiApplication is created, which leaves the cocoa plugin unloadable.
+    3. Homebrew Python re-execs ``Python.app``. That process is not Terminal,
+       so macOS may hide Desktop directory listings. Qt then scans
+       ``.../plugins/platforms``, sees an empty folder, and aborts even though
+       ``libqcocoa.dylib`` is there. Staging the plugins under ``/tmp`` and
+       loading cocoa by absolute path avoids that scan.
 
-    So: scrub inherited Qt paths, point ``QT_PLUGIN_PATH`` at *this* venv, and
-    create the QGuiApplication immediately.
+    So: scrub inherited Qt paths, point plugin env vars at a readable staging
+    dir, preload cocoa, and keep a process-wide QGuiApplication.
     """
+    global _QT_APP
     # Matplotlib must not grab a Qt binding of its own before our viewers do.
     os.environ.setdefault('MPLBACKEND', 'Agg')
 
@@ -57,21 +65,59 @@ def _bootstrap_qt():
 
     try:
         import PyQt6
-        from PyQt6.QtCore import QCoreApplication
-        from PyQt6.QtGui import QGuiApplication
     except Exception:
         return
 
     plugins = Path(PyQt6.__file__).resolve().parent / 'Qt6' / 'plugins'
+    platforms = plugins / 'platforms'
     if not plugins.is_dir():
         return
+
+    # Homebrew Python re-execs Python.app. That bundle is not Terminal, so
+    # macOS TCC can hide Desktop directory listings: Qt scans platforms/,
+    # sees nothing, and aborts even though libqcocoa.dylib is present.
+    # Point Qt at a staging dir outside Desktop; the files there are
+    # symlinks (or copies) to this venv's real plugins.
+    staged = platforms
+    if sys.platform == 'darwin':
+        staged = Path('/tmp/salvatore-qt-platforms')
+        try:
+            staged.mkdir(parents=True, exist_ok=True)
+            for plugin in platforms.glob('libq*.dylib'):
+                dest = staged / plugin.name
+                if dest.is_symlink() or dest.exists():
+                    dest.unlink()
+                try:
+                    dest.symlink_to(plugin)
+                except OSError:
+                    import shutil
+                    shutil.copy2(plugin, dest)
+        except OSError:
+            staged = platforms
+
+    # Set these *before* importing QtGui: QGuiApplication construction otherwise
+    # initializes the platform factory with empty/Python.app search paths.
     os.environ['QT_PLUGIN_PATH'] = str(plugins)
-    # Let Qt append "platforms" itself; setting QT_QPA_PLATFORM_PLUGIN_PATH to
-    # that subfolder has been observed to make 6.11 miss libqcocoa.dylib.
-    os.environ.pop('QT_QPA_PLATFORM_PLUGIN_PATH', None)
-    QCoreApplication.setLibraryPaths([str(plugins)])
+    os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = str(staged)
+
+    try:
+        from PyQt6.QtCore import QCoreApplication, QPluginLoader
+        from PyQt6.QtGui import QGuiApplication
+    except Exception:
+        return
+
+    QCoreApplication.setLibraryPaths([str(plugins), str(staged)])
+
+    cocoa = staged / 'libqcocoa.dylib'
+    if cocoa.is_file():
+        loader = QPluginLoader(str(cocoa.resolve()))
+        if not loader.isLoaded() and not loader.load():
+            print(f'*** Qt cocoa plugin failed to load: {loader.errorString()}')
+
     if QGuiApplication.instance() is None:
-        QGuiApplication(sys.argv[:1] if sys.argv else ['simple_cli'])
+        _QT_APP = QGuiApplication(sys.argv[:1] if sys.argv else ['simple_cli'])
+    else:
+        _QT_APP = QGuiApplication.instance()
 
 _bootstrap_qt()
 
