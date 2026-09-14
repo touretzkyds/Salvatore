@@ -2,6 +2,7 @@ import os
 import re
 import cv2
 import base64
+import datetime
 import openai
 
 
@@ -38,6 +39,17 @@ class OpenAIClient():
         self._store_id = None
         self.vector_store_id = None
         self.documents = []
+        # Per-session debug log of the exact payload sent to OpenAI. Written to logs/ (gitignored).
+        self.messages_log_path = None
+        try:
+            logs_dir = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), '..', 'logs'))
+            os.makedirs(logs_dir, exist_ok=True)
+            timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+            self.messages_log_path = os.path.join(
+                logs_dir, f'openai_messages_{timestamp}.txt')
+        except Exception as e:
+            print(f"*** Could not set up OpenAI message log: {e}")
         self.set_preamble(default_preamble)
 
     def set_preamble(self, preamble):
@@ -149,6 +161,51 @@ class OpenAIClient():
         if len(self.messages) > (max_messages + keep):
             self.messages = self.messages[:keep] + self.messages[-max_messages:]
 
+    def _log_messages(self, messages, label='query'):
+        """Append the exact payload sent to OpenAI to the session log file.
+
+        Called right before each API call, so it captures precisely what the
+        model receives (system preamble, world-map/domino context, user turns).
+        Image parts are summarized so the log stays readable.
+        """
+        if not self.messages_log_path:
+            return
+        try:
+            with open(self.messages_log_path, 'a', encoding='utf-8') as f:
+                stamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                f.write(f"===== {label} @ {stamp} (model={self.model}) =====\n")
+                for index, message in enumerate(messages, start=1):
+                    role = str(message.get('role', '?'))
+                    f.write(f"--- [{index}] {role} ---\n")
+                    f.write(self._format_content(message.get('content', '')))
+                    f.write("\n")
+                f.write("\n")
+        except Exception as e:
+            print(f"*** Failed to write OpenAI message log: {e}")
+
+    @staticmethod
+    def _format_content(content):
+        "Render a message's content for the log, omitting bulky base64 images."
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            lines = []
+            for part in content:
+                if isinstance(part, dict):
+                    part_type = part.get('type', 'unknown')
+                    if part_type == 'input_text':
+                        lines.append(part.get('text', ''))
+                    elif part_type == 'input_image':
+                        url = part.get('image_url', '')
+                        size = len(url) if isinstance(url, str) else 0
+                        lines.append(f'[input_image: {size} chars base64 omitted]')
+                    else:
+                        lines.append(f'[{part_type}]')
+                else:
+                    lines.append(str(part))
+            return '\n'.join(lines)
+        return str(content)
+
     async def _moderate_text(self, text):
         """
         Calls the OpenAI Moderation API.
@@ -210,6 +267,7 @@ class OpenAIClient():
 
         # --- 3. Call Completion API ---
         try:
+            self._log_messages(list(self.messages), 'query')
             response = self.client.responses.create(
                 model = self.model,
                 input = list(self.messages),
@@ -269,6 +327,7 @@ class OpenAIClient():
                             'image_url': f'data:image/jpeg;base64,{base64_image}'})
         messages = [ {'role': 'user',
                       'content': content } ]
+        self._log_messages(messages, 'oneshot')
         response = self.client.responses.create(
             model = self.model,
             input = messages,
