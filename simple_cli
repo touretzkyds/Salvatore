@@ -148,12 +148,10 @@ if hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer"):
 ################ CLI functions
 
 ans = None
-RUNNING = True
-
 
 def runfsm(module_name):
     new_fsm = _program_runfsm(module_name)
-    globals()['running_fsm'] = aim_fsm.program.running_fsm
+    globals()['running_fsm'] = aim_fsm.speech_rec.running_fsm = aim_fsm.program.running_fsm
     _process_pending_viewer_launches(timeout=0.1)
     return new_fsm
 
@@ -272,7 +270,7 @@ def _flush_main_thread_gui(timeout=0.15):
 
 def cli_loop(_robot):
     global ans, RUNNING, robot, file_to_run, running_fsm
-
+    RUNNING = True
     robot = _robot
 
     cli_globals = globals()
@@ -283,9 +281,11 @@ def cli_loop(_robot):
     if file_to_run:
         time.sleep(0.25)
         running_fsm = runfsm(file_to_run)
+        aim_fsm.speech_rec.running_fsm = running_fsm
         cli_globals['running_fsm'] = running_fsm
     else:
         running_fsm = aim_fsm.program.running_fsm = StateMachineProgram()
+        aim_fsm.speech_rec.running_fsm = running_fsm
         cli_globals['running_fsm'] = running_fsm
         robot.loop.call_soon_threadsafe(running_fsm.start)
 
@@ -297,6 +297,7 @@ def cli_loop(_robot):
         cli_loop._line = ''
         while cli_loop._line == '':
             running_fsm = aim_fsm.program.running_fsm
+            aim_fsm.speech_rec.running_fsm = running_fsm
             _process_qt_events_if_needed()
             _process_pending_viewer_launches()
             readline.write_history_file(histfile)
@@ -377,7 +378,7 @@ def cli_loop(_robot):
             if running_fsm:
                 running_fsm.stop()
             print('exiting...')
-            RUNNING=False
+            RUNNING = False
             continue
         else:
             cli_loop._line = 'ans=' + cli_loop._line
@@ -668,14 +669,14 @@ loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 # loop.set_debug(True)
 
-def loopthread():
+def loop_runner():
     global loop
     #print(f"loop thead in {threading.current_thread().native_id}")
     loop.run_forever()
 
-th = threading.Thread(target=loopthread)
-th.daemon = True
-th.start()
+loop_thread = threading.Thread(target=loop_runner)
+loop_thread.daemon = True
+loop_thread.start()
 
 if 'ROBOT' in os.environ:
     robot_address = os.environ['ROBOT']
@@ -687,6 +688,7 @@ launch_speech_listener = 'ROBOT_NO_SPEECH' not in os.environ
 
 robot = Robot(loop=loop, host=robot_address,
               launch_speech_listener=launch_speech_listener)
+robot.speech_listener.set_confirmation(True) # play confirmation bell
 evbase.robot_for_loading = robot
 
 ################ Launch

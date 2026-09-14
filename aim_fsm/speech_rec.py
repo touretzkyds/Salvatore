@@ -1,12 +1,16 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 import webbrowser
 import threading
+import queue
 import os
 import sys
+import pathlib
 import logging
+from playsound3 import playsound
 
 from .thesaurus import Thesaurus
+from .document_upload import DocumentError, prepare_document
 from .evbase import Event
 from .events import SpeechEvent
 
@@ -16,13 +20,49 @@ CORS(app)  # This will enable CORS for all routes
 
 session_id = None
 
+# Console messages are pushed to any listening browser tabs over SSE.
+message_subscribers = []
+message_subscribers_lock = threading.Lock()
+
+def add_to_transcript(text):
+    with message_subscribers_lock:
+        subscribers = list(message_subscribers)
+    for q in subscribers:
+        q.put(text)
+
+@app.route('/api/console-stream')
+def console_stream():
+    def gen():
+        q = queue.Queue()
+        with message_subscribers_lock:
+            message_subscribers.append(q)
+        try:
+            while True:
+                text = q.get()
+                # Blank lines/newlines within a message would break the SSE
+                # framing, so send each line as its own "data:" field.
+                for line in text.splitlines() or ['']:
+                    yield f'data: {line}\n'
+                yield '\n'
+        finally:
+            with message_subscribers_lock:
+                if q in message_subscribers:
+                    message_subscribers.remove(q)
+    return Response(gen(), mimetype='text/event-stream')
+
 @app.route('/')
 def serve_index():
     this_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.join(this_dir, '..' )
     return send_from_directory(parent_dir, 'speech_listener.html')
 
-@app.route('/closed.html')
+@app.route('/ptt_pointer.png')
+def serve_pointer():
+    this_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.join(this_dir, '..', 'media' )
+    return send_from_directory(parent_dir, 'ptt_pointer.png')
+
+@app.route('/listener_closed.html')
 def serve_closed():
     this_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.join(this_dir, '..' )
@@ -40,6 +80,75 @@ def handle_get_session_id():
     global session_id
     return jsonify({'sessionID': session_id})
 
+@app.route('/api/reset-fsm', methods=['POST'])
+def handle_reset_fsm():
+    global running_fsm
+    print('Resetting state machine...')
+    add_to_transcript('Resetting state machine...')
+    this_dir = os.path.dirname(os.path.abspath(__file__))
+    media_path = os.path.abspath(os.path.join(this_dir, '..', 'media', 'reset_fsm.mp3'))
+    playsound(media_path)
+    for child in running_fsm.children.values():
+        child.stop()
+    if 'reset_fsm' in running_fsm.children:
+        running_fsm.children['reset_fsm'].start()
+    elif running_fsm.start_node:
+        running_fsm.start_node.start()
+    else:
+        pass
+    return jsonify({'status': 'ok'})
+
+
+DOCUMENT_MAX_BYTES = 200 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = DOCUMENT_MAX_BYTES
+DOCUMENT_TEXT_MAX_BYTES = 200 * 1024  # text documents are re-sent to the LLM every turn
+
+@app.route('/api/upload-script', methods=['POST'])
+def handle_upload_script():
+    global robot
+    file = request.files.get('file')
+    if file is None or file.filename == '':
+        return jsonify({'status': 'error', 'error': 'no file'}), 400
+
+    data = file.read(DOCUMENT_MAX_BYTES + 1)
+    if len(data) > DOCUMENT_MAX_BYTES:
+        return jsonify({'status': 'error',
+                        'error': 'file is larger than %d MB' % (DOCUMENT_MAX_BYTES // (1024 * 1024))}), 400
+    try:
+        document = prepare_document(file.filename, data, DOCUMENT_TEXT_MAX_BYTES)
+    except DocumentError as exc:
+        return jsonify({'status': 'error', 'error': str(exc)}), 400
+
+    if document.kind == 'pdf':
+        try:
+            robot.openai_client.attach_pdf(document.saved_name, document.data)
+        except Exception as exc:
+            print("*** OpenAI PDF indexing failed: %s" % exc)
+            return jsonify({'status': 'error',
+                            'error': 'OpenAI could not accept this PDF: %s' % exc}), 502
+        print("Indexed PDF '%s' (%d bytes) for retrieval" %
+              (document.saved_name, len(document.data)))
+        return jsonify({'status': 'ok',
+                        'name': document.saved_name,
+                        'sourceBytes': len(data),
+                        'kind': document.kind})
+
+    dest = pathlib.Path.home() / 'Documents' / 'Celeste' / document.saved_name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(document.text, encoding='utf-8')
+    context = 'Contents of uploaded document "%s":\n\n%s' % (document.saved_name,
+                                                                document.text)
+    robot.loop.call_soon_threadsafe(robot.openai_client.note_for_later, context)
+    text_bytes = len(document.text.encode('utf-8'))
+    print("Loaded text '%s' (%d bytes) into Celeste's context" %
+          (document.saved_name, text_bytes))
+    return jsonify({'status': 'ok',
+                    'name': document.saved_name,
+                    'sourceBytes': len(data),
+                    'textBytes': text_bytes,
+                    'kind': document.kind})
+
+
 @app.route('/api/speech-to-text', methods=['POST'])
 def handle_speech_to_text():
     global speech_listener
@@ -48,13 +157,13 @@ def handle_speech_to_text():
     return jsonify({'status': 'ok'})
 
 class SpeechListener():
-    def __init__(self, _robot, thesaurus=Thesaurus(), debug=False):
-        global robot
+    def __init__(self, _robot, thesaurus=Thesaurus(), debug=False, confirmation_bell=False):
+        global robot, speech_listener
         robot = _robot
-        global speech_listener
         speech_listener = self
 
         self.robot = robot
+        self.confirmation_bell = confirmation_bell
         self.thesaurus = thesaurus
         self.debug = debug
         self.enabled = True
@@ -65,7 +174,7 @@ class SpeechListener():
         log = logging.getLogger('werkzeug')
         log.setLevel(logging.ERROR)
         # Debug must be false to prevent duplicate tab:
-        app.run(port=51327, debug=False, use_reloader=False)
+        app.run(port=51327, debug=False, use_reloader=False, threaded=True)
 
     def load_listener_page(self):
         webbrowser.open_new_tab('http://127.0.0.1:51327/')
@@ -86,6 +195,9 @@ class SpeechListener():
         self.paused = False
         #print('Speech unpaused')
 
+    def set_confirmation(self, value=True):
+        self.confirmation_bell = value
+
     def handle_utterance(self, utterance):
         if not self.enabled or len(utterance) == 0:
             return
@@ -97,10 +209,17 @@ class SpeechListener():
         words = [self.thesaurus.lookup_word(w) for w in utterance.split(" ")]
         words = self.thesaurus.substitute_phrases(words)
         string = " ".join(words)
+        if len(string) == 0:
+            print("Heard: (nothing)")
+            add_to_transcript("Heard: (nothing)")
+            return
+        if self.confirmation_bell:
+            this_dir = os.path.dirname(os.path.abspath(__file__))
+            media_path = os.path.abspath(os.path.join(this_dir, '..', 'media', 'acknowledge4.mp3'))
+            playsound(media_path)
         print("Heard: '%s'" % string)
         sys.stdout.flush()
-        if len(string) == 0:
-            return
+        add_to_transcript("Heard: '%s'" % string)
         event = SpeechEvent(string, words)
         self.robot.erouter.post(event)
         

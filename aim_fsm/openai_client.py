@@ -1,9 +1,9 @@
 import os
 import re
-import datetime
 import cv2
 import base64
 import openai
+
 
 from .events import OpenAIEvent
 
@@ -14,66 +14,19 @@ default_preamble = """
   You converse with humans and answer questions as concisely as possible.
   Pronounce "AprilTag-1.a" as "April Tag 1-A", and similarly for any word of form "AprilTag-N.x".
   Pronounce "OrangeBarrel.a" as "Orange Barrel A", pronounce "BlueBarrel.b" as "Blue Barrel B", and similarly for other barrel designators.
-  Remember to be concise in your answers.
+  Remember to be concise in your answers, but warm and friendly.
+  Prefer one clear spoken sentence; offer more detail only if the user asks.
 """
 
 class OpenAIClient():
-    # DEFAULT_MODEL = 'ft:gpt-4.1-mini-2025-04-14:personal::DNFPej0B' # first sft-ed model
-    # DEFAULT_MODEL = 'ft:gpt-4.1-mini-2025-04-14:personal::DQ5voZao' # 2nd sft-ed model
-    # DEFAULT_MODEL = 'ft:gpt-4.1-mini-2025-04-14:personal::DWxcDNYf'
-    # DEFAULT_MODEL = 'ft:gpt-4.1-mini-2025-04-14:personal::DX6j1Oh6'
-    # DEFAULT_MODEL = 'ft:gpt-4.1-mini-2025-04-14:personal::DYQ13Ahz'
-    DEFAULT_MODEL = 'gpt-4o'
-
-    class LoggedMessageHistory(list):
-        def __init__(self, iterable=(), on_change=None):
-            super().__init__(iterable)
-            self._on_change = on_change
-
-        def _changed(self):
-            if self._on_change:
-                self._on_change()
-
-        def append(self, item):
-            super().append(item)
-            self._changed()
-
-        def extend(self, iterable):
-            super().extend(iterable)
-            self._changed()
-
-        def insert(self, index, item):
-            super().insert(index, item)
-            self._changed()
-
-        def pop(self, index=-1):
-            value = super().pop(index)
-            self._changed()
-            return value
-
-        def remove(self, item):
-            super().remove(item)
-            self._changed()
-
-        def clear(self):
-            super().clear()
-            self._changed()
-
-        def __setitem__(self, key, value):
-            super().__setitem__(key, value)
-            self._changed()
-
-        def __delitem__(self, key):
-            super().__delitem__(key)
-            self._changed()
+    # DEFAULT_MODEL = 'gpt-4o'
+    DEFAULT_MODEL = 'gpt-5.5'
+    VECTOR_STORE_EXPIRY_DAYS = 1
+    MAX_SEARCH_RESULTS = 5
     def __init__(self, robot, model=DEFAULT_MODEL, use_moderation=False):
         self.robot = robot
         self.model = model
         self.use_moderation = use_moderation
-        logs_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'logs'))
-        os.makedirs(logs_dir, exist_ok=True)
-        timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-        self.messages_log_path = os.path.join(logs_dir, f'openai_messages_{timestamp}.txt')
         env_key = os.getenv("OPENAI_API_KEY")
         if env_key:
             openai.api_key = env_key
@@ -82,76 +35,18 @@ class OpenAIClient():
         else:
             print("*** No OPENAI_API_KEY provided.  GPT will not be available.")
             self.client = None
+        self._store_id = None
+        self.vector_store_id = None
+        self.documents = []
         self.set_preamble(default_preamble)
 
-    def _make_logged_history(self, messages):
-        return self.LoggedMessageHistory(messages, on_change=self._write_messages_log)
-
-    def _write_messages_log(self):
-        try:
-            with open(self.messages_log_path, 'w', encoding='utf-8') as f:
-                for index, message in enumerate(self.messages, start=1):
-                    role = self._format_role(message.get('role'))
-                    content = self._format_content(message.get('content', ''))
-                    f.write(f"=== Message {index}: {role} ===\n")
-                    f.write(content)
-                    f.write("\n\n")
-        except Exception as e:
-            print(f"*** Failed to write OpenAI message log: {e}")
-
-    def _format_role(self, role):
-        role_map = {
-            'system': 'System',
-            'user': 'User',
-            'assistant': 'Assistant',
-        }
-        role_str = str(role or '')
-        return role_map.get(role_str.lower(), role_str.title() or 'Unknown')
-
-    def _render_escapes(self, text):
-        if not isinstance(text, str):
-            text = str(text)
-        # Render common escape sequences as actual control characters.
-        text = text.replace('\\r\\n', '\n')
-        text = text.replace('\\n', '\n')
-        text = text.replace('\\t', '\t')
-        return text
-
-    def _format_content(self, content):
-        if isinstance(content, str):
-            return self._render_escapes(content)
-
-        if isinstance(content, list):
-            lines = []
-            for idx, part in enumerate(content, start=1):
-                if isinstance(part, dict):
-                    part_type = str(part.get('type', 'unknown'))
-                    if part_type == 'text':
-                        lines.append(f"[Part {idx} - text]")
-                        lines.append(self._render_escapes(part.get('text', '')))
-                        continue
-                    if part_type == 'image_url':
-                        image_url = ''
-                        image_obj = part.get('image_url', {})
-                        if isinstance(image_obj, dict):
-                            image_url = image_obj.get('url', '')
-                        lines.append(f"[Part {idx} - image_url]")
-                        lines.append(self._render_escapes(image_url))
-                        continue
-                    lines.append(f"[Part {idx} - {part_type}]")
-                    lines.append(self._render_escapes(str(part)))
-                else:
-                    lines.append(f"[Part {idx}]")
-                    lines.append(self._render_escapes(part))
-            return '\n'.join(lines)
-
-        return self._render_escapes(content)
-
     def set_preamble(self, preamble):
-        self.messages = self._make_logged_history([
+        self.messages = [
             {'role': 'system', 'content': preamble}
-        ])
-        self._write_messages_log()
+        ]
+        self.pinned_count = 1
+        for filename in list(getattr(self, 'documents', ())):
+            self._pin_note_text(filename)
 
     def query(self, query_text):
         self.messages.append({'role': 'system', 'content': self.robot.world_map.get_prompt()})
@@ -161,6 +56,58 @@ class OpenAIClient():
     def note_for_later(self, text):
         self.messages.append({'role': 'system', 'content': text})
 
+    def _ensure_vector_store(self):
+        "Create this session's store on first use; one store holds every document."
+        if self._store_id is None:
+            store = self.client.vector_stores.create(
+                name='celeste-docs',
+                expires_after={'anchor': 'last_active_at',
+                               'days': self.VECTOR_STORE_EXPIRY_DAYS},
+            )
+            self._store_id = store.id
+        return self._store_id
+
+    def attach_pdf(self, filename, data):
+        """Index a PDF for retrieval instead of attaching it to every turn.
+        Called from the Flask upload thread; blocks it until indexing finishes."""
+        if self.client is None:
+            raise RuntimeError("OpenAI is not configured")
+        store_id = self._ensure_vector_store()
+        vs_file = self.client.vector_stores.files.upload_and_poll(
+            vector_store_id=store_id,
+            file=(filename, data, 'application/pdf'),
+        )
+        if vs_file.status != 'completed':
+            raise RuntimeError('OpenAI could not index this PDF (%s)'
+                               % (vs_file.last_error or vs_file.status,))
+        self.vector_store_id = store_id
+        self.robot.loop.call_soon_threadsafe(self._pin_document_note, filename)
+        return store_id
+
+    def _pin_note_text(self, filename):
+        """Tell the model the document exists, ahead of the trimmed history.
+        file_search is a tool the model chooses to call; with no note it has no
+        reason to think there is anything to search and answers from its own
+        knowledge instead."""
+        self.messages.insert(self.pinned_count,
+            {'role': 'system',
+             'content': 'A document named "%s" has been loaded. Use the '
+                        'file_search tool to look up anything the user asks '
+                        'about its contents.' % filename})
+        self.pinned_count += 1
+
+    def _pin_document_note(self, filename):
+        self.documents.append(filename)
+        self._pin_note_text(filename)
+
+    def _tools(self):
+        "Built per call: the vector store does not exist until a document is uploaded."
+        if not self.vector_store_id:
+            return []
+        return [{'type': 'file_search',
+                 'vector_store_ids': [self.vector_store_id],
+                 'max_num_results': self.MAX_SEARCH_RESULTS}]
+
     def camera_query(self, query_text):
         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
         swapped_colors = cv2.cvtColor(self.robot.camera_image, cv2.COLOR_RGB2BGR)
@@ -169,9 +116,9 @@ class OpenAIClient():
         self.messages.append(
             {'role' : 'user',
              'content' : [
-                 {'type': 'text', 'text': query_text },
-                 {'type': 'image_url',
-                  'image_url': {'url': f'data:image/jpeg;base64,{base64_image}'}}
+                 {'type': 'input_text', 'text': query_text },
+                 {'type': 'input_image',
+                  'image_url': f'data:image/jpeg;base64,{base64_image}'}
              ]})
         self.robot.loop.call_soon_threadsafe(self.launch_openai_query)
 
@@ -184,9 +131,9 @@ class OpenAIClient():
         self.messages.append(
             {'role' : 'user',
              'content' : [
-                 {'type': 'text', 'text': instruction or default_instruction},
-                 {'type': 'image_url',
-                  'image_url': {'url': f'data:image/jpeg;base64,{base64_image}'}}
+                 {'type': 'input_text', 'text': instruction or default_instruction},
+                 {'type': 'input_image',
+                  'image_url': f'data:image/jpeg;base64,{base64_image}'}
              ]})
         self.robot.loop.call_soon_threadsafe(self.launch_openai_query)
 
@@ -198,12 +145,9 @@ class OpenAIClient():
         Keeps the system prompt (index 0) and the last `max_messages`
         from the history, to prevent context window overflow.
         """
-        if len(self.messages) > (max_messages + 1):
-            # Preserves the preamble (self.messages[0])
-            # and appends the last `max_messages` from the history.
-            self.messages = self._make_logged_history(
-                [self.messages[0]] + self.messages[-(max_messages):]
-            )
+        keep = self.pinned_count
+        if len(self.messages) > (max_messages + keep):
+            self.messages = self.messages[:keep] + self.messages[-max_messages:]
 
     async def _moderate_text(self, text):
         """
@@ -237,7 +181,7 @@ class OpenAIClient():
             if isinstance(user_query_content, list):
                 # Find the text part in the list
                 for part in user_query_content:
-                    if part.get('type') == 'text':
+                    if part.get('type') == 'input_text':
                         user_query_text = part.get('text', '')
                         break
             elif isinstance(user_query_content, str):
@@ -266,11 +210,12 @@ class OpenAIClient():
 
         # --- 3. Call Completion API ---
         try:
-            response = self.client.chat.completions.create(
+            response = self.client.responses.create(
                 model = self.model,
-                messages = self.messages
+                input = list(self.messages),
+                tools = self._tools(),
             )
-            answer = response.choices[0].message.content
+            answer = response.output_text
         except Exception as e:
             print(f"*** OpenAI completion call failed: {e}")
             # Post a generic error and stop.
@@ -308,28 +253,27 @@ class OpenAIClient():
     def oneshot_query(self, query_text, image=None):
         self.robot.loop.call_soon_threadsafe(self.launch_openai_oneshot_query, query_text, image)
 
-
     def launch_openai_oneshot_query(self, query_text, image=None):
         self.robot.loop.create_task(self.openai_oneshot_query(query_text, image))
 
     async def openai_oneshot_query(self, query_text, image=None):
         if self.client is None:
             return
-        content = [ {'type': 'text', 'text': query_text } ]
+        content = [ {'type': 'input_text', 'text': query_text } ]
         if image is not None:
             encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
             swapped_colors = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
             result, encimg = cv2.imencode('.jpg', swapped_colors, encode_param)
             base64_image = base64.b64encode(encimg).decode('utf-8')
-            content.append({'type': 'image_url',
-                            'image_url': {'url': f'data:image/jpeg;base64,{base64_image}'}})
+            content.append({'type': 'input_image',
+                            'image_url': f'data:image/jpeg;base64,{base64_image}'})
         messages = [ {'role': 'user',
                       'content': content } ]
-        response = self.client.chat.completions.create(
+        response = self.client.responses.create(
             model = self.model,
-            messages = messages
+            input = messages,
         )
-        answer = response.choices[0].message.content
+        answer = response.output_text
         cleaned_answer = re.sub(r'\\[\[\]\(\)]', '', answer)
         event = OpenAIEvent(cleaned_answer)
         self.robot.erouter.post(event)

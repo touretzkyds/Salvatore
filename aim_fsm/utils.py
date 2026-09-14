@@ -179,7 +179,7 @@ class Pose():
         elif theta is not None:
             self.quaternion = Quaternion(angle_z = theta)
         else:
-            self.quaternion = None
+            self.quaternion = Quaternion(angle_z = 0)
         self.origin_id = origin_id
 
     def __repr__(self):
@@ -205,7 +205,7 @@ class PoseEstimate(Pose):
             y = p.y
             z = p.z
             theta = p.theta
-            quaternion = getattr(p, 'quaternion', None)
+            quaternion = p.quaternion
         super().__init__(x, y, z, theta, quaternion)
         initial_uncertainty = 200
         process_noise = 0.01
