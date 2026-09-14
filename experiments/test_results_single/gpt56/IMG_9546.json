@@ -1,0 +1,58 @@
+{
+  "input_image": "/Users/yuyuanzhengjack/Desktop/Touretzky_Dev/Salvatore/experiments/test_images_single/IMG_9546.jpg",
+  "detector": {
+    "standing_weights": "bestieee.pt",
+    "fallen_weights": "fallen.pt",
+    "confidence_threshold": 0.35
+  },
+  "gpt": {
+    "model": "gpt-5.6-sol",
+    "detail": "original",
+    "reasoning_effort": "medium",
+    "samples": 1
+  },
+  "dominoes": [
+    {
+      "domino_id": "domino-0",
+      "posture": "standing",
+      "detector_confidence": 0.9797621369361877,
+      "center_xy": [
+        2074.5,
+        1476.0
+      ],
+      "quad": [
+        [
+          2835.0,
+          1827.0
+        ],
+        [
+          1314.0,
+          1827.0
+        ],
+        [
+          1314.0,
+          1125.0
+        ],
+        [
+          2835.0,
+          1125.0
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1314.0,
+          1476.0
+        ],
+        [
+          2835.0,
+          1476.0
+        ]
+      ],
+      "end_0_pips": 6,
+      "end_1_pips": 1,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "input_image": "/Users/yuyuanzhengjack/Desktop/Touretzky_Dev/Salvatore/experiments/test_images_single/IMG_9548.jpg",
+  "detector": {
+    "standing_weights": "bestieee.pt",
+    "fallen_weights": "fallen.pt",
+    "confidence_threshold": 0.35
+  },
+  "gpt": {
+    "model": "gpt-5.6-sol",
+    "detail": "original",
+    "reasoning_effort": "medium",
+    "samples": 1
+  },
+  "dominoes": [
+    {
+      "domino_id": "domino-0",
+      "posture": "standing",
+      "detector_confidence": 0.9769351482391357,
+      "center_xy": [
+        2074.499755859375,
+        1520.999755859375
+      ],
+      "quad": [
+        [
+          2862.0,
+          1863.0
+        ],
+        [
+          1287.0,
+          1863.0
+        ],
+        [
+          1287.0,
+          1179.0
+        ],
+        [
+          2862.0,
+          1179.0
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1286.999755859375,
+          1520.999755859375
+        ],
+        [
+          2861.999755859375,
+          1520.999755859375
+        ]
+      ],
+      "end_0_pips": 6,
+      "end_1_pips": 6,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null
+    },
+    {
+      "domino_id": "domino-1",
+      "posture": "fallen",
+      "detector_confidence": 0.9369071125984192,
+      "center_xy": [
+        2113.64990234375,
+        1512.0
+      ],
+      "quad": [
+        [
+          2872.7998046875,
+          1971.89990234375
+        ],
+        [
+          1354.5,
+          1971.89990234375
+        ],
+        [
+          1354.5,
+          1052.10009765625
+        ],
+        [
+          2872.7998046875,
+          1052.10009765625
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1354.5,
+          1512.0
+        ],
+        [
+          2872.7998046875,
+          1512.0
+        ]
+      ],
+      "end_0_pips": 6,
+      "end_1_pips": 6,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "input_image": "/Users/yuyuanzhengjack/Desktop/Touretzky_Dev/Salvatore/experiments/test_images_single/IMG_9549.jpg",
+  "detector": {
+    "standing_weights": "bestieee.pt",
+    "fallen_weights": "fallen.pt",
+    "confidence_threshold": 0.35
+  },
+  "gpt": {
+    "model": "gpt-5.6-sol",
+    "detail": "original",
+    "reasoning_effort": "medium",
+    "samples": 1
+  },
+  "dominoes": [
+    {
+      "domino_id": "domino-0",
+      "posture": "standing",
+      "detector_confidence": 0.8323584794998169,
+      "center_xy": [
+        2079.0,
+        1606.5
+      ],
+      "quad": [
+        [
+          2817.0,
+          1935.0
+        ],
+        [
+          1341.0,
+          1935.0
+        ],
+        [
+          1341.0,
+          1278.0
+        ],
+        [
+          2817.0,
+          1278.0
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1341.0,
+          1606.5
+        ],
+        [
+          2817.0,
+          1606.5
+        ]
+      ],
+      "end_0_pips": 1,
+      "end_1_pips": 5,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null
+    },
+    {
+      "domino_id": "domino-1",
+      "posture": "fallen",
+      "detector_confidence": 0.3886633515357971,
+      "center_xy": [
+        2983.0498046875,
+        614.2498779296875
+      ],
+      "quad": [
+        [
+          3918.599853515625,
+          1228.5
+        ],
+        [
+          2047.499755859375,
+          1228.5
+        ],
+        [
+          2047.499755859375,
+          0.0
+        ],
+        [
+          3918.599853515625,
+          0.0
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          2047.499755859375,
+          614.2498779296875
+        ],
+        [
+          3918.599853515625,
+          614.2498779296875
+        ]
+      ],
+      "end_0_pips": null,
+      "end_1_pips": null,
+      "readable": false,
+      "gpt_agreement": 0.0,
+      "uncertainty_reason": "Domino face is not visible; both crops show background objects and cables."
+    }
+  ]
+}

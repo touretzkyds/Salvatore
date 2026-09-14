@@ -1,0 +1,142 @@
+{
+  "input_image": "/Users/yuyuanzhengjack/Desktop/Touretzky_Dev/Salvatore/experiments/test_images_single/IMG_9541.jpg",
+  "detector": {
+    "standing_weights": "bestieee.pt",
+    "fallen_weights": "fallen.pt",
+    "confidence_threshold": 0.35
+  },
+  "gpt": {
+    "model": "gpt-5.6-sol",
+    "detail": "original",
+    "reasoning_effort": "medium",
+    "samples": 1
+  },
+  "dominoes": [
+    {
+      "domino_id": "domino-0",
+      "posture": "standing",
+      "detector_confidence": 0.9789753556251526,
+      "center_xy": [
+        1953.0,
+        1516.5
+      ],
+      "quad": [
+        [
+          2763.0,
+          1890.0
+        ],
+        [
+          1143.0,
+          1890.0
+        ],
+        [
+          1143.0,
+          1143.0
+        ],
+        [
+          2763.0,
+          1143.0
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1143.0,
+          1516.5
+        ],
+        [
+          2763.0,
+          1516.5
+        ]
+      ],
+      "end_0_pips": 0,
+      "end_1_pips": 4,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null
+    },
+    {
+      "domino_id": "domino-1",
+      "posture": "fallen",
+      "detector_confidence": 0.9447489380836487,
+      "center_xy": [
+        1997.099853515625,
+        1489.94970703125
+      ],
+      "quad": [
+        [
+          2759.399658203125,
+          1896.299560546875
+        ],
+        [
+          1234.800048828125,
+          1896.299560546875
+        ],
+        [
+          1234.800048828125,
+          1083.599853515625
+        ],
+        [
+          2759.399658203125,
+          1083.599853515625
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1234.800048828125,
+          1489.94970703125
+        ],
+        [
+          2759.399658203125,
+          1489.94970703125
+        ]
+      ],
+      "end_0_pips": 0,
+      "end_1_pips": 4,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null
+    },
+    {
+      "domino_id": "domino-2",
+      "posture": "standing",
+      "detector_confidence": 0.661706805229187,
+      "center_xy": [
+        3478.5,
+        162.0
+      ],
+      "quad": [
+        [
+          4023.0,
+          324.0
+        ],
+        [
+          2934.0,
+          324.0
+        ],
+        [
+          2934.0,
+          0.0
+        ],
+        [
+          4023.0,
+          0.0
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          2934.0,
+          162.0
+        ],
+        [
+          4023.0,
+          162.0
+        ]
+      ],
+      "end_0_pips": null,
+      "end_1_pips": null,
+      "readable": false,
+      "gpt_agreement": 0.0,
+      "uncertainty_reason": "Domino face is not visible; all images show only a blurred gray surface/shadow."
+    }
+  ]
+}
