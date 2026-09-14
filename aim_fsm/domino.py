@@ -56,6 +56,26 @@ def normalize_axis_angle(theta: float | None) -> float | None:
     return float((theta + math.pi) % (2.0 * math.pi) - math.pi)
 
 
+def directed_long_axis(quad: np.ndarray) -> tuple[float, float]:
+    """Return a stable image-space long-axis angle and length for a quad.
+
+    The axis points left-to-right, or top-to-bottom for a vertical domino. This
+    gives the GPT crop a repeatable endpoint 0/1 convention without assuming
+    that the bottom edge of a standing domino is its long edge.
+    """
+    points = np.asarray(quad, dtype=np.float32).reshape(4, 2)
+    vectors = np.roll(points, -1, axis=0) - points
+    lengths = np.linalg.norm(vectors, axis=1)
+    longest_index = int(np.argmax(lengths))
+    length = float(lengths[longest_index])
+    if length <= 1e-6:
+        raise ValueError("Domino quadrilateral has no usable long edge.")
+    direction = vectors[longest_index] / length
+    if direction[0] < -1e-6 or (abs(float(direction[0])) <= 1e-6 and direction[1] < 0.0):
+        direction = -direction
+    return (float(math.atan2(direction[1], direction[0])), length)
+
+
 @dataclass(frozen=True)
 class DominoObservation:
     center_xy: tuple[float, float]
@@ -135,16 +155,26 @@ class DominoWorldDetector:
         fallen_weights: str = "fallen.pt",
         standing_label_weights: str = "different.pt",
         fallen_label_weights: str = "fallenhalf.pt",
+        label_mode: str = "cnn",
     ) -> None:
         self.conf_threshold = conf_threshold
+        if label_mode not in ("cnn", "none"):
+            raise ValueError("label_mode must be 'cnn' or 'none'")
+        self.label_mode = label_mode
         
         # Dual main detection models
         self.model_standing = YOLO(resolve_weights(standing_weights))
         self.model_fallen = YOLO(resolve_weights(fallen_weights))
         
-        # Dual half-face classification providers
-        self.label_standing = CNNDominoLabelProvider(weights_path=standing_label_weights)
-        self.label_fallen = CNNDominoLabelProvider(weights_path=fallen_label_weights)
+        # Keep the original half-face classifiers as the default path.  The
+        # GPT experiment uses label_mode="none" so these large models are not
+        # loaded and the returned geometry can be labelled in one API batch.
+        if self.label_mode == "cnn":
+            self.label_standing = CNNDominoLabelProvider(weights_path=standing_label_weights)
+            self.label_fallen = CNNDominoLabelProvider(weights_path=fallen_label_weights)
+        else:
+            self.label_standing = None
+            self.label_fallen = None
 
         self._last_frame_id: Optional[int] = None
         self._last_observations: list[DominoObservation] = []
@@ -290,9 +320,11 @@ class DominoWorldDetector:
 
         for raw_obb, fallback_length, conf, is_fallen in filtered_quads:
             quad_pts = np.array(raw_obb, dtype=np.float32)
-            side1 = np.linalg.norm(quad_pts[0] - quad_pts[1])
-            side2 = np.linalg.norm(quad_pts[1] - quad_pts[2])
-            pixel_length = max(side1, side2)
+            try:
+                stable_axis_theta, stable_pixel_length = directed_long_axis(quad_pts)
+            except ValueError:
+                continue
+            pixel_length = stable_pixel_length
 
             crop, crop_major_len, rect = self.rotate_crop(image_rgb, raw_obb)
             if pixel_length <= 0:
@@ -305,40 +337,52 @@ class DominoWorldDetector:
             if h < 20 or w < 20:
                 continue
 
-            left_raw, right_raw = self.split_halves(crop)
-            if left_raw is None or right_raw is None:
-                continue
+            left_pred: Optional[int] = None
+            right_pred: Optional[int] = None
+            face_label: Optional[str] = None
+            face_confidence: Optional[float] = None
+            if self.label_mode == "cnn":
+                left_raw, right_raw = self.split_halves(crop)
+                if left_raw is None or right_raw is None:
+                    continue
 
-            left_clean = self.remove_white_border(left_raw)
-            right_clean = self.remove_white_border(right_raw)
+                left_clean = self.remove_white_border(left_raw)
+                right_clean = self.remove_white_border(right_raw)
 
-            # Choose half-face classifier depending on best detection model
-            active_label_provider = self.label_fallen if is_fallen else self.label_standing
+                # Choose half-face classifier depending on best detection model.
+                active_label_provider = self.label_fallen if is_fallen else self.label_standing
+                if active_label_provider is None:
+                    continue
 
-            left_tensor = active_label_provider.preprocess_half(left_clean)
-            right_tensor = active_label_provider.preprocess_half(right_clean)
+                left_tensor = active_label_provider.preprocess_half(left_clean)
+                right_tensor = active_label_provider.preprocess_half(right_clean)
 
-            left_pred, left_conf = active_label_provider.predict_half(left_tensor)
-            right_pred, right_conf = active_label_provider.predict_half(right_tensor)
+                left_pred, left_conf = active_label_provider.predict_half(left_tensor)
+                right_pred, right_conf = active_label_provider.predict_half(right_tensor)
 
-            if left_pred is None or right_pred is None:
-                continue
+                if left_pred is None or right_pred is None:
+                    continue
 
-            face_label = f"{left_pred}-{right_pred}"
-            face_confidence = float(min(left_conf, right_conf))
+                face_label = f"{left_pred}-{right_pred}"
+                face_confidence = float(min(left_conf, right_conf))
             distance_cm = float((self.known_length * self.focal_length) / pixel_length)
 
             (cx, cy), (dim_a, dim_b), angle_deg = rect
             mask_area = float(dim_a * dim_b)
 
-            sorted_by_y = sorted(quad_pts, key=lambda pt: pt[1], reverse=True)
-            p_base1, p_base2 = sorted_by_y[0], sorted_by_y[1]
-            if p_base1[0] > p_base2[0]:
-                p_base1, p_base2 = p_base2, p_base1
-
-            dx_base = p_base2[0] - p_base1[0]
-            dy_base = p_base2[1] - p_base1[1]
-            major_theta = float(normalize_axis_angle(math.atan2(dy_base, dx_base)))
+            if self.label_mode == "none":
+                # The experiment needs a directed *long* axis so GPT's END 0
+                # and END 1 map back to the same physical world-map ends.
+                major_theta = stable_axis_theta
+            else:
+                # Preserve the original CNN pipeline's orientation behavior.
+                sorted_by_y = sorted(quad_pts, key=lambda pt: pt[1], reverse=True)
+                p_base1, p_base2 = sorted_by_y[0], sorted_by_y[1]
+                if p_base1[0] > p_base2[0]:
+                    p_base1, p_base2 = p_base2, p_base1
+                dx_base = p_base2[0] - p_base1[0]
+                dy_base = p_base2[1] - p_base1[1]
+                major_theta = float(normalize_axis_angle(math.atan2(dy_base, dx_base)))
 
             dx = math.cos(major_theta) * (pixel_length / 2.0)
             dy = math.sin(major_theta) * (pixel_length / 2.0)
@@ -358,7 +402,7 @@ class DominoWorldDetector:
                 distance_cm=distance_cm,
                 face_label=face_label,
                 face_confidence=face_confidence,
-                half_counts=(left_pred, right_pred),
+                half_counts=(left_pred, right_pred) if self.label_mode == "cnn" else (None, None),
                 is_fallen=is_fallen,
             )
             observations.append(obs)

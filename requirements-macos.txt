@@ -11,6 +11,7 @@ flask
 flask_cors
 pyreadline3
 openai>=3.8.0
+pydantic>=2
 playsound3
 gTTS
 google-cloud-texttospeech

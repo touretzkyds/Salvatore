@@ -1,0 +1,222 @@
+{
+  "image": "IMG_9523.jpg",
+  "error": null,
+  "detected": 5,
+  "dominoes": [
+    {
+      "domino_id": "domino-0",
+      "posture": "standing",
+      "detector_confidence": 0.9382038116455078,
+      "face_label": "?",
+      "end_0_pips": null,
+      "end_1_pips": null,
+      "readable": false,
+      "gpt_agreement": 0.0,
+      "uncertainty_reason": "Each end crop contains multiple pip fields separated by dividers, so neither end is uniquely identifiable.",
+      "center_xy": [
+        2152.06103515625,
+        1740.001953125
+      ],
+      "quad": [
+        [
+          887.9052734375,
+          2071.002685546875
+        ],
+        [
+          871.775390625,
+          1478.237548828125
+        ],
+        [
+          3416.2177734375,
+          1409.0009765625
+        ],
+        [
+          3432.34765625,
+          2001.76611328125
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          879.8398067303076,
+          1774.620239904924
+        ],
+        [
+          3424.282263582192,
+          1705.383666345076
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-1",
+      "posture": "standing",
+      "detector_confidence": 0.891402006149292,
+      "face_label": "4-6",
+      "end_0_pips": 4,
+      "end_1_pips": 6,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null,
+      "center_xy": [
+        2740.49951171875,
+        1732.49951171875
+      ],
+      "quad": [
+        [
+          3419.99951171875,
+          2015.999755859375
+        ],
+        [
+          2060.99951171875,
+          2015.999755859375
+        ],
+        [
+          2060.99951171875,
+          1448.999755859375
+        ],
+        [
+          3419.99951171875,
+          1448.999755859375
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          2060.99951171875,
+          1732.49951171875
+        ],
+        [
+          3419.99951171875,
+          1732.49951171875
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-2",
+      "posture": "fallen",
+      "detector_confidence": 0.8155851364135742,
+      "face_label": "?",
+      "end_0_pips": null,
+      "end_1_pips": null,
+      "readable": false,
+      "gpt_agreement": 0.0,
+      "uncertainty_reason": "Each end crop contains multiple pip fields separated by dividers, so neither end is uniquely identifiable.",
+      "center_xy": [
+        2217.600341796875,
+        1789.199462890625
+      ],
+      "quad": [
+        [
+          3414.599853515625,
+          2167.19970703125
+        ],
+        [
+          1020.600341796875,
+          2167.19970703125
+        ],
+        [
+          1020.600341796875,
+          1411.19970703125
+        ],
+        [
+          3414.599853515625,
+          1411.19970703125
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1020.6005859375,
+          1789.199462890625
+        ],
+        [
+          3414.60009765625,
+          1789.199462890625
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-3",
+      "posture": "standing",
+      "detector_confidence": 0.7995054125785828,
+      "face_label": "5-5",
+      "end_0_pips": 5,
+      "end_1_pips": 5,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null,
+      "center_xy": [
+        1606.4998779296875,
+        1763.999755859375
+      ],
+      "quad": [
+        [
+          2349.0,
+          2052.0
+        ],
+        [
+          864.0,
+          2052.0
+        ],
+        [
+          864.0,
+          1476.0
+        ],
+        [
+          2349.0,
+          1476.0
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          863.9998779296875,
+          1763.999755859375
+        ],
+        [
+          2348.9998779296875,
+          1763.999755859375
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-4",
+      "posture": "fallen",
+      "detector_confidence": 0.5802776217460632,
+      "face_label": "?",
+      "end_0_pips": null,
+      "end_1_pips": null,
+      "readable": false,
+      "gpt_agreement": 0.0,
+      "uncertainty_reason": "The pip-bearing face is not visible; only the blank back/edge is shown.",
+      "center_xy": [
+        3253.94970703125,
+        340.1999206542969
+      ],
+      "quad": [
+        [
+          4025.69970703125,
+          629.9998779296875
+        ],
+        [
+          2482.19970703125,
+          629.9998779296875
+        ],
+        [
+          2482.19970703125,
+          50.399993896484375
+        ],
+        [
+          4025.69970703125,
+          50.399993896484375
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          2482.19970703125,
+          340.1999206542969
+        ],
+        [
+          4025.69970703125,
+          340.1999206542969
+        ]
+      ]
+    }
+  ]
+}

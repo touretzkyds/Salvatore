@@ -1,0 +1,222 @@
+{
+  "image": "IMG_9515.jpg",
+  "error": null,
+  "detected": 5,
+  "dominoes": [
+    {
+      "domino_id": "domino-0",
+      "posture": "standing",
+      "detector_confidence": 0.9645960927009583,
+      "face_label": "?",
+      "end_0_pips": null,
+      "end_1_pips": null,
+      "readable": false,
+      "gpt_agreement": 0.0,
+      "uncertainty_reason": "The supplied crops each contain multiple domino ends, so the intended END 0 and END 1 are ambiguous.",
+      "center_xy": [
+        1995.4268798828125,
+        1515.9844970703125
+      ],
+      "quad": [
+        [
+          673.122802734375,
+          1889.662353515625
+        ],
+        [
+          649.65576171875,
+          1238.453857421875
+        ],
+        [
+          3317.731689453125,
+          1142.306884765625
+        ],
+        [
+          3341.19873046875,
+          1793.515380859375
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          661.3889800420736,
+          1564.057982346603
+        ],
+        [
+          3329.464779723551,
+          1467.911011794022
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-1",
+      "posture": "standing",
+      "detector_confidence": 0.9524629712104797,
+      "face_label": "4-4",
+      "end_0_pips": 4,
+      "end_1_pips": 4,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null,
+      "center_xy": [
+        2608.819580078125,
+        1482.0860595703125
+      ],
+      "quad": [
+        [
+          1908.23876953125,
+          1815.0301513671875
+        ],
+        [
+          1884.17431640625,
+          1205.4012451171875
+        ],
+        [
+          3309.40087890625,
+          1149.1422119140625
+        ],
+        [
+          3333.46533203125,
+          1758.7711181640625
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1896.206278733489,
+          1510.2155757584185
+        ],
+        [
+          3321.432881422761,
+          1453.9565433822065
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-2",
+      "posture": "standing",
+      "detector_confidence": 0.9237524271011353,
+      "face_label": "3-4",
+      "end_0_pips": 3,
+      "end_1_pips": 4,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null,
+      "center_xy": [
+        1426.5,
+        1557.0
+      ],
+      "quad": [
+        [
+          2196.0,
+          1872.0
+        ],
+        [
+          657.0,
+          1872.0
+        ],
+        [
+          657.0,
+          1242.0
+        ],
+        [
+          2196.0,
+          1242.0
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          657.0,
+          1557.0
+        ],
+        [
+          2196.0,
+          1557.0
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-3",
+      "posture": "fallen",
+      "detector_confidence": 0.9083645939826965,
+      "face_label": "?",
+      "end_0_pips": null,
+      "end_1_pips": null,
+      "readable": false,
+      "gpt_agreement": 0.0,
+      "uncertainty_reason": "The supplied crops each contain multiple domino ends, so the intended END 0 and END 1 are ambiguous.",
+      "center_xy": [
+        2074.24853515625,
+        1558.41357421875
+      ],
+      "quad": [
+        [
+          823.16064453125,
+          2010.553466796875
+        ],
+        [
+          797.37109375,
+          1185.27197265625
+        ],
+        [
+          3325.33642578125,
+          1106.27392578125
+        ],
+        [
+          3351.1259765625,
+          1931.555419921875
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          810.2659406400965,
+          1597.9125968853407
+        ],
+        [
+          3338.2311296724038,
+          1518.9145515521593
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-4",
+      "posture": "fallen",
+      "detector_confidence": 0.43074482679367065,
+      "face_label": "?",
+      "end_0_pips": null,
+      "end_1_pips": null,
+      "readable": false,
+      "gpt_agreement": 0.0,
+      "uncertainty_reason": "The crops contain multiple domino ends, and END 0 is also partially cropped, making the intended faces ambiguous.",
+      "center_xy": [
+        2189.25,
+        1515.14990234375
+      ],
+      "quad": [
+        [
+          3332.699951171875,
+          1915.199951171875
+        ],
+        [
+          1045.800048828125,
+          1915.199951171875
+        ],
+        [
+          1045.800048828125,
+          1115.099853515625
+        ],
+        [
+          3332.699951171875,
+          1115.099853515625
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1045.800048828125,
+          1515.14990234375
+        ],
+        [
+          3332.699951171875,
+          1515.14990234375
+        ]
+      ]
+    }
+  ]
+}

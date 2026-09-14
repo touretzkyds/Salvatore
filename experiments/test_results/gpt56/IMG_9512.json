@@ -1,0 +1,93 @@
+{
+  "image": "IMG_9512.jpg",
+  "error": null,
+  "detected": 2,
+  "dominoes": [
+    {
+      "domino_id": "domino-0",
+      "posture": "standing",
+      "detector_confidence": 0.9791593551635742,
+      "face_label": "6-6",
+      "end_0_pips": 6,
+      "end_1_pips": 6,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null,
+      "center_xy": [
+        1918.30615234375,
+        1271.3211669921875
+      ],
+      "quad": [
+        [
+          1393.002685546875,
+          1732.8197021484375
+        ],
+        [
+          1242.110107421875,
+          1093.3223876953125
+        ],
+        [
+          2443.610107421875,
+          809.8223876953125
+        ],
+        [
+          2594.502685546875,
+          1449.3197021484375
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1317.5561379344808,
+          1413.071174422578
+        ],
+        [
+          2519.056166753019,
+          1129.571159561797
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-1",
+      "posture": "fallen",
+      "detector_confidence": 0.3724680542945862,
+      "face_label": "?",
+      "end_0_pips": null,
+      "end_1_pips": null,
+      "readable": false,
+      "gpt_agreement": 0.0,
+      "uncertainty_reason": "Domino face is not visible; all images show only a blurred, shadowed surface.",
+      "center_xy": [
+        1061.5498046875,
+        47.2499885559082
+      ],
+      "quad": [
+        [
+          1511.999755859375,
+          81.89997863769531
+        ],
+        [
+          611.099853515625,
+          81.89997863769531
+        ],
+        [
+          611.099853515625,
+          12.599998474121094
+        ],
+        [
+          1511.999755859375,
+          12.599998474121094
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          611.099853515625,
+          47.2499885559082
+        ],
+        [
+          1511.999755859375,
+          47.2499885559082
+        ]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,136 @@
+{
+  "image": "IMG_9511.jpg",
+  "error": null,
+  "detected": 3,
+  "dominoes": [
+    {
+      "domino_id": "domino-0",
+      "posture": "standing",
+      "detector_confidence": 0.9768379926681519,
+      "face_label": "6-6",
+      "end_0_pips": 6,
+      "end_1_pips": 6,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null,
+      "center_xy": [
+        2079.0,
+        1512.0
+      ],
+      "quad": [
+        [
+          2907.0,
+          1881.0
+        ],
+        [
+          1251.0,
+          1881.0
+        ],
+        [
+          1251.0,
+          1143.0
+        ],
+        [
+          2907.0,
+          1143.0
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1251.0,
+          1512.0
+        ],
+        [
+          2907.0,
+          1512.0
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-1",
+      "posture": "fallen",
+      "detector_confidence": 0.8275836706161499,
+      "face_label": "6-6",
+      "end_0_pips": 6,
+      "end_1_pips": 6,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null,
+      "center_xy": [
+        2116.7998046875,
+        1534.0499267578125
+      ],
+      "quad": [
+        [
+          2885.39990234375,
+          2003.39990234375
+        ],
+        [
+          1348.1998291015625,
+          2003.39990234375
+        ],
+        [
+          1348.1998291015625,
+          1064.699951171875
+        ],
+        [
+          2885.39990234375,
+          1064.699951171875
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1348.1997680664062,
+          1534.0499267578125
+        ],
+        [
+          2885.3998413085938,
+          1534.0499267578125
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-2",
+      "posture": "fallen",
+      "detector_confidence": 0.402748703956604,
+      "face_label": "?",
+      "end_0_pips": null,
+      "end_1_pips": null,
+      "readable": false,
+      "gpt_agreement": 0.0,
+      "uncertainty_reason": "Domino face is not visible; all images are blurred/obscured.",
+      "center_xy": [
+        3219.2998046875,
+        31.5
+      ],
+      "quad": [
+        [
+          3565.7998046875,
+          44.099998474121094
+        ],
+        [
+          2872.7998046875,
+          44.099998474121094
+        ],
+        [
+          2872.7998046875,
+          18.900001525878906
+        ],
+        [
+          3565.7998046875,
+          18.900001525878906
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          2872.7998046875,
+          31.5
+        ],
+        [
+          3565.7998046875,
+          31.5
+        ]
+      ]
+    }
+  ]
+}

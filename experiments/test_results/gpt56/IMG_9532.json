@@ -1,0 +1,179 @@
+{
+  "image": "IMG_9532.jpg",
+  "error": null,
+  "detected": 4,
+  "dominoes": [
+    {
+      "domino_id": "domino-0",
+      "posture": "standing",
+      "detector_confidence": 0.9789536595344543,
+      "face_label": "0-2",
+      "end_0_pips": 0,
+      "end_1_pips": 2,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null,
+      "center_xy": [
+        2083.5,
+        1651.5
+      ],
+      "quad": [
+        [
+          3357.0,
+          1971.0
+        ],
+        [
+          810.0,
+          1971.0
+        ],
+        [
+          810.0,
+          1332.0
+        ],
+        [
+          3357.0,
+          1332.0
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          810.0,
+          1651.5
+        ],
+        [
+          3357.0,
+          1651.5
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-1",
+      "posture": "standing",
+      "detector_confidence": 0.9606137871742249,
+      "face_label": "1-1",
+      "end_0_pips": 1,
+      "end_1_pips": 1,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null,
+      "center_xy": [
+        2644.56884765625,
+        1664.2008056640625
+      ],
+      "quad": [
+        [
+          1917.72021484375,
+          1994.0400390625
+        ],
+        [
+          1898.54345703125,
+          1380.38916015625
+        ],
+        [
+          3371.41748046875,
+          1334.36181640625
+        ],
+        [
+          3390.59423828125,
+          1948.0126953125
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1908.1318399740817,
+          1687.214477250425
+        ],
+        [
+          3381.0058553384183,
+          1641.1871340777
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-2",
+      "posture": "fallen",
+      "detector_confidence": 0.9519269466400146,
+      "face_label": "0-2",
+      "end_0_pips": 0,
+      "end_1_pips": 2,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null,
+      "center_xy": [
+        2195.550048828125,
+        1669.499755859375
+      ],
+      "quad": [
+        [
+          3383.099609375,
+          2003.39990234375
+        ],
+        [
+          1007.9998779296875,
+          2003.39990234375
+        ],
+        [
+          1007.9998779296875,
+          1335.60009765625
+        ],
+        [
+          3383.099609375,
+          1335.60009765625
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          1008.000244140625,
+          1669.499755859375
+        ],
+        [
+          3383.099853515625,
+          1669.499755859375
+        ]
+      ]
+    },
+    {
+      "domino_id": "domino-3",
+      "posture": "standing",
+      "detector_confidence": 0.8677387833595276,
+      "face_label": "0-0",
+      "end_0_pips": 0,
+      "end_1_pips": 0,
+      "readable": true,
+      "gpt_agreement": 1.0,
+      "uncertainty_reason": null,
+      "center_xy": [
+        1525.5,
+        1669.5
+      ],
+      "quad": [
+        [
+          2259.0,
+          1971.0
+        ],
+        [
+          792.0,
+          1971.0
+        ],
+        [
+          792.0,
+          1368.0
+        ],
+        [
+          2259.0,
+          1368.0
+        ]
+      ],
+      "axis_endpoints": [
+        [
+          792.0,
+          1669.5
+        ],
+        [
+          2259.0,
+          1669.5
+        ]
+      ]
+    }
+  ]
+}
