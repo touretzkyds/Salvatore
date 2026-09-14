@@ -1,7 +1,10 @@
 numpy
 Pillow
 opencv-python
-pyqt6
+# Pin both together: a PyQt6 / PyQt6-Qt6 skew (e.g. 6.11.0 + 6.11.1) makes
+# macOS fail with: Could not find the Qt platform plugin "cocoa".
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.0
 termcolor
 websocket_client
 flask

@@ -114,46 +114,14 @@ class StateMachineProgram(StateNode):
 
         self.domino = bool(domino)
         self.domino_labeling = bool(domino_labeling)
+        self.domino_optional = bool(domino_optional)
         self.domino_conf_threshold = float(domino_conf_threshold)
         self.domino_weights_path = domino_weights_path
         self.domino_face_weights_path = domino_face_weights_path
+        # Detector loads torch/ultralytics; that must happen *after* the Qt
+        # viewers create QGuiApplication, or macOS dies with a missing cocoa
+        # plugin. start() calls _init_domino_detector() once viewers are up.
         self.robot.domino_detector = None
-        if self.domino:
-            import_errors = []
-            for module_name in ("lab8.domino_world_detector", "domino_world_detector"):
-                try:
-                    detector_module = import_module(module_name)
-                    detector_cls = getattr(detector_module, "DominoWorldDetector")
-                    if self.domino_labeling:
-                        if hasattr(detector_module, "ClassicalDominoLabelProvider"):
-                            label_provider = detector_module.ClassicalDominoLabelProvider()
-                        elif hasattr(detector_module, "CNNDominoLabelProvider"):
-                            label_provider = detector_module.CNNDominoLabelProvider(
-                                weights_path=self.domino_face_weights_path)
-                        else:
-                            raise AttributeError(
-                                f"{module_name} is missing both ClassicalDominoLabelProvider "
-                                "and CNNDominoLabelProvider")
-                    else:
-                        label_provider = detector_module.NullDominoLabelProvider()
-                    self.robot.domino_detector = detector_cls(
-                        conf_threshold=self.domino_conf_threshold,
-                        weights_path=self.domino_weights_path,
-                        label_provider=label_provider,
-                    )
-                    break
-                except Exception as exc:
-                    import_errors.append((module_name, exc))
-            if self.robot.domino_detector is None:
-                joined = "; ".join(f"{name}: {exc}" for name, exc in import_errors)
-                if not domino_optional:
-                    raise ImportError(f"Unable to initialize domino detector ({joined})")
-                # Asked for perception but willing to live without it: say so
-                # plainly and carry on, rather than refusing to start.
-                print(f'*** Domino perception unavailable ({joined})')
-                print('*** Continuing without the camera.')
-                self.domino = False
-                self.domino_labeling = False
 
         # The bridge reads detected tiles into board and hands for the rules
         # engine. It costs nothing without a detector, and having it always
@@ -243,6 +211,9 @@ class StateMachineProgram(StateNode):
                 lambda: PathViewer(self.robot, self.robot.rrt),
             )
 
+        # Qt is up; safe to pull in torch / ultralytics for perception.
+        self._init_domino_detector()
+
         if self.speech:
             self.robot.speech_listener.enable()
         else:
@@ -253,6 +224,48 @@ class StateMachineProgram(StateNode):
 
         # Call parent's start() to launch the state machine by invoking the start node.
         super().start()
+
+    def _init_domino_detector(self):
+        """Load the YOLO domino detector after Qt viewers have started.
+
+        Importing ultralytics/torch before QGuiApplication is created makes
+        PyQt6 unable to load the macOS cocoa platform plugin.
+        """
+        if not self.domino or self.robot.domino_detector is not None:
+            return
+        import_errors = []
+        for module_name in ("lab8.domino_world_detector", "domino_world_detector"):
+            try:
+                detector_module = import_module(module_name)
+                detector_cls = getattr(detector_module, "DominoWorldDetector")
+                if self.domino_labeling:
+                    if hasattr(detector_module, "ClassicalDominoLabelProvider"):
+                        label_provider = detector_module.ClassicalDominoLabelProvider()
+                    elif hasattr(detector_module, "CNNDominoLabelProvider"):
+                        label_provider = detector_module.CNNDominoLabelProvider(
+                            weights_path=self.domino_face_weights_path)
+                    else:
+                        raise AttributeError(
+                            f"{module_name} is missing both ClassicalDominoLabelProvider "
+                            "and CNNDominoLabelProvider")
+                else:
+                    label_provider = detector_module.NullDominoLabelProvider()
+                self.robot.domino_detector = detector_cls(
+                    conf_threshold=self.domino_conf_threshold,
+                    weights_path=self.domino_weights_path,
+                    label_provider=label_provider,
+                )
+                break
+            except Exception as exc:
+                import_errors.append((module_name, exc))
+        if self.robot.domino_detector is None:
+            joined = "; ".join(f"{name}: {exc}" for name, exc in import_errors)
+            if not self.domino_optional:
+                raise ImportError(f"Unable to initialize domino detector ({joined})")
+            print(f'*** Domino perception unavailable ({joined})')
+            print('*** Continuing without the camera.')
+            self.domino = False
+            self.domino_labeling = False
 
     def stop(self):
         self.stop_children()

@@ -25,7 +25,55 @@ import threading
 import time
 import traceback
 from importlib import __import__, reload
+from pathlib import Path
 from queue import Empty, SimpleQueue
+
+def _bootstrap_qt():
+    """Load this venv's Qt platform plugin before anything else can break it.
+
+    Two things commonly abort startup with
+    ``Could not find the Qt platform plugin "cocoa"``:
+
+    1. A leftover ``QT_QPA_PLATFORM_PLUGIN_PATH`` from another project venv
+       (e.g. Celeste), which points Qt at the wrong ``libqcocoa.dylib``.
+    2. Importing torch / ultralytics / a Qt-backed matplotlib *before* the
+       QGuiApplication is created, which leaves the cocoa plugin unloadable.
+
+    So: scrub inherited Qt paths, point ``QT_PLUGIN_PATH`` at *this* venv, and
+    create the QGuiApplication immediately.
+    """
+    # Matplotlib must not grab a Qt binding of its own before our viewers do.
+    os.environ.setdefault('MPLBACKEND', 'Agg')
+
+    # Drop plugin paths that belong to some other checkout's venv.
+    here = str(Path(__file__).resolve().parent)
+    for key in ('QT_PLUGIN_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH'):
+        val = os.environ.get(key) or ''
+        if val and here not in val:
+            os.environ.pop(key, None)
+    # Cursor / CI sometimes force offscreen; a real Terminal wants cocoa.
+    if os.environ.get('QT_QPA_PLATFORM') == 'offscreen' and sys.stdout.isatty():
+        os.environ.pop('QT_QPA_PLATFORM', None)
+
+    try:
+        import PyQt6
+        from PyQt6.QtCore import QCoreApplication
+        from PyQt6.QtGui import QGuiApplication
+    except Exception:
+        return
+
+    plugins = Path(PyQt6.__file__).resolve().parent / 'Qt6' / 'plugins'
+    if not plugins.is_dir():
+        return
+    os.environ['QT_PLUGIN_PATH'] = str(plugins)
+    # Let Qt append "platforms" itself; setting QT_QPA_PLATFORM_PLUGIN_PATH to
+    # that subfolder has been observed to make 6.11 miss libqcocoa.dylib.
+    os.environ.pop('QT_QPA_PLATFORM_PLUGIN_PATH', None)
+    QCoreApplication.setLibraryPaths([str(plugins)])
+    if QGuiApplication.instance() is None:
+        QGuiApplication(sys.argv[:1] if sys.argv else ['simple_cli'])
+
+_bootstrap_qt()
 
 try:
     from termcolor import cprint

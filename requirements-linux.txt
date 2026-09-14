@@ -1,7 +1,9 @@
 numpy
 Pillow
 opencv-python
-pyqt6
+# Keep the binding and the Qt libs on the same release.
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.0
 termcolor
 websocket_client
 flask
