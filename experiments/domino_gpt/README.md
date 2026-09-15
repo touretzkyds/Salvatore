@@ -57,3 +57,16 @@ called on every live camera frame: a network request would block perception and
 incur repeated cost. The next integration step, after measuring accuracy on
 real robot frames, is a background label worker triggered only for stable,
 unlabelled world-map objects, with a crop cache and retry/consensus policy.
+
+## Detector-free full-frame experiment
+
+To ask GPT to find and read every domino directly from the complete image,
+without loading `Standing.pt`, `Fallen.pt`, or any other local detector:
+
+```bash
+.venv/bin/python -m experiments.domino_gpt.run_direct_experiment /absolute/path/to/frame.jpg
+```
+
+This writes a structured JSON result plus an annotated image containing GPT's
+approximate normalized bounding boxes. These boxes are diagnostic image-space
+estimates; they do not replace calibrated world-map coordinates.

@@ -1,0 +1,41 @@
+{
+  "input_image": "/Users/yuyuanzhengjack/Desktop/Touretzky_Dev/Salvatore/experiments/test_images/IMG_9526.jpg",
+  "pipeline": "direct-full-frame-gpt-no-local-detector",
+  "gpt": {
+    "model": "gpt-5.6-sol",
+    "detail": "original",
+    "reasoning_effort": "medium"
+  },
+  "dominoes": [
+    {
+      "domino_id": "domino-0",
+      "end_a_pips": 5,
+      "end_b_pips": 5,
+      "posture": "standing",
+      "readable": true,
+      "bbox_normalized": [
+        160,
+        316,
+        397,
+        578
+      ],
+      "uncertainty_reason": null,
+      "face_label": "5-5"
+    },
+    {
+      "domino_id": "domino-1",
+      "end_a_pips": 4,
+      "end_b_pips": 6,
+      "posture": "standing",
+      "readable": true,
+      "bbox_normalized": [
+        385,
+        401,
+        683,
+        686
+      ],
+      "uncertainty_reason": null,
+      "face_label": "4-6"
+    }
+  ]
+}
