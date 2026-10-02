@@ -49,7 +49,7 @@ class StateMachineProgram(StateNode):
                  annotated_image_callback: Optional[Callable[[Any, dict], None]] = None,
                  viewer_crosshairs = False,  # set to True to draw viewer crosshairs
                  speech = True,
-                 openai_model = None,        # set to 'gpt-5.6-sol' or other model name to override the client default
+                 openai_model = None,        # set to a model name to override the conversational client default
                  particle_filter = None,
                  num_particles = 500,
                  landmarks = dict(),
@@ -66,6 +66,9 @@ class StateMachineProgram(StateNode):
                  domino_conf_threshold = 0.3,
                  domino_weights_path = None,      # segmentation weights; default weights/domino_segment.pt
                  domino_face_weights_path = None, # half-face CNN weights, if the CNN label provider is used
+                 domino_vision_mode = 'local',   # 'local', 'gpt-full-frame', or 'gpt-only'
+                 domino_gpt_model = 'gpt-6.1-sol',
+                 domino_gpt_interval = 3.0,
                  domino_player_side = 'far',      # which side of the table the human sits on
                  domino_play_area = None,         # (x, y, radius) in mm where tiles are played
                  domino_optional = False,         # warn instead of raising if the detector won't load
@@ -120,6 +123,12 @@ class StateMachineProgram(StateNode):
         self.domino_conf_threshold = float(domino_conf_threshold)
         self.domino_weights_path = domino_weights_path
         self.domino_face_weights_path = domino_face_weights_path
+        if domino_vision_mode not in ('local', 'gpt-full-frame', 'gpt-only'):
+            raise ValueError(
+                "domino_vision_mode must be 'local', 'gpt-full-frame', or 'gpt-only'")
+        self.domino_vision_mode = domino_vision_mode
+        self.domino_gpt_model = str(domino_gpt_model)
+        self.domino_gpt_interval = float(domino_gpt_interval)
         # Detector loads torch/ultralytics; that must happen *after* the Qt
         # viewers create QGuiApplication, or macOS dies with a missing cocoa
         # plugin. start() calls _init_domino_detector() once viewers are up.
@@ -235,12 +244,38 @@ class StateMachineProgram(StateNode):
         """
         if not self.domino or self.robot.domino_detector is not None:
             return
+        if self.domino_vision_mode == 'gpt-only':
+            try:
+                from .domino_gpt_detector import GPTFullFrameDominoDetector
+                self.robot.domino_detector = GPTFullFrameDominoDetector(
+                    local_detector=None,
+                    client=getattr(self.robot.openai_client, 'client', None),
+                    model=self.domino_gpt_model,
+                    request_interval_seconds=self.domino_gpt_interval,
+                    should_request=lambda: not self.robot.is_moving(),
+                )
+                print(
+                    f"*** Domino vision mode: GPT only "
+                    f"({self.domino_gpt_model}, interval={self.domino_gpt_interval:.1f}s)"
+                )
+                return
+            except Exception as exc:
+                if not self.domino_optional:
+                    raise ImportError(
+                        f"Unable to initialize GPT-only domino detector ({exc})") from exc
+                print(f'*** GPT-only domino perception unavailable ({exc})')
+                print('*** Continuing without the camera.')
+                self.domino = False
+                self.domino_labeling = False
+                return
         import_errors = []
         for module_name in ("lab8.domino_world_detector", "domino_world_detector"):
             try:
                 detector_module = import_module(module_name)
                 detector_cls = getattr(detector_module, "DominoWorldDetector")
-                if self.domino_labeling:
+                if self.domino_vision_mode == 'gpt-full-frame':
+                    label_provider = detector_module.NullDominoLabelProvider()
+                elif self.domino_labeling:
                     if hasattr(detector_module, "ClassicalDominoLabelProvider"):
                         label_provider = detector_module.ClassicalDominoLabelProvider()
                     elif hasattr(detector_module, "CNNDominoLabelProvider"):
@@ -252,11 +287,27 @@ class StateMachineProgram(StateNode):
                             "and CNNDominoLabelProvider")
                 else:
                     label_provider = detector_module.NullDominoLabelProvider()
-                self.robot.domino_detector = detector_cls(
+                local_detector = detector_cls(
                     conf_threshold=self.domino_conf_threshold,
                     weights_path=self.domino_weights_path,
                     label_provider=label_provider,
                 )
+                if self.domino_vision_mode == 'gpt-full-frame':
+                    from .domino_gpt_detector import GPTFullFrameDominoDetector
+                    self.robot.domino_detector = GPTFullFrameDominoDetector(
+                        local_detector=local_detector,
+                        client=getattr(self.robot.openai_client, 'client', None),
+                        model=self.domino_gpt_model,
+                        request_interval_seconds=self.domino_gpt_interval,
+                        should_request=lambda: not self.robot.is_moving(),
+                    )
+                    print(
+                        f"*** Domino vision mode: GPT full frame "
+                        f"({self.domino_gpt_model}, interval={self.domino_gpt_interval:.1f}s)"
+                    )
+                else:
+                    self.robot.domino_detector = local_detector
+                    print("*** Domino vision mode: local")
                 break
             except Exception as exc:
                 import_errors.append((module_name, exc))
@@ -271,6 +322,10 @@ class StateMachineProgram(StateNode):
 
     def stop(self):
         self.stop_children()
+        detector = getattr(self.robot, 'domino_detector', None)
+        close = getattr(detector, 'close', None)
+        if callable(close):
+            close()
         super().stop()
         self.robot.erouter.clear()
 

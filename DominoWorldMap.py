@@ -2,6 +2,7 @@ from aim_fsm import *
 
 import cv2
 import numpy as np
+import os
 
 
 class DominoWorldMap(StateMachineProgram):
@@ -14,6 +15,8 @@ class DominoWorldMap(StateMachineProgram):
             aruco=False,
             domino=True,
             domino_labeling=True,
+            domino_vision_mode=os.getenv('SALVATORE_DOMINO_VISION_MODE', 'local'),
+            domino_gpt_model=os.getenv('SALVATORE_DOMINO_GPT_MODEL', 'gpt-6.1-sol'),
             force_annotation=True,
         )
 
@@ -31,8 +34,10 @@ class DominoWorldMap(StateMachineProgram):
             if debug_sheet is not None:
                 imshow("domino-label-debug", debug_sheet)
             for obs in detector.latest_observations():
+                is_gpt_box = bool(getattr(obs, "gpt_geometry_fallback", False))
+                outline_color = (220, 70, 255) if is_gpt_box else (255, 120, 30)
                 quad = np.array(obs.quad, dtype=np.int32).reshape((-1, 1, 2))
-                cv2.polylines(out, [quad], True, (255, 120, 30), 1, lineType=cv2.LINE_AA)
+                cv2.polylines(out, [quad], True, outline_color, 1, lineType=cv2.LINE_AA)
                 if getattr(obs, "divider_endpoints", None):
                     p0 = tuple(int(round(v)) for v in obs.divider_endpoints[0])
                     p1 = tuple(int(round(v)) for v in obs.divider_endpoints[1])
@@ -57,7 +62,12 @@ class DominoWorldMap(StateMachineProgram):
                 continue
             if not getattr(obj, "image_quad", None):
                 continue
-            color = (0, 220, 90) if getattr(obj, "is_visible", False) else (140, 140, 140)
+            is_gpt_box = bool(getattr(obj, "gpt_geometry_fallback", False))
+            color = (
+                (220, 70, 255) if is_gpt_box
+                else (0, 220, 90) if getattr(obj, "is_visible", False)
+                else (140, 140, 140)
+            )
             quad = np.array(obj.image_quad, dtype=np.int32).reshape((-1, 1, 2))
             cv2.polylines(out, [quad], True, color, 2, lineType=cv2.LINE_AA)
             if getattr(obj, "image_axis", None):
@@ -73,6 +83,8 @@ class DominoWorldMap(StateMachineProgram):
                 label = object_id
                 if getattr(obj, "face_label", None):
                     label += f" {obj.face_label}"
+                if is_gpt_box:
+                    label += " [GPT box]"
                 cv2.putText(
                     out,
                     label,

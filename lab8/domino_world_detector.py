@@ -126,6 +126,8 @@ class DominoObservation:
     half_counts: Optional[tuple[Optional[int], Optional[int]]] = None
     half_image_centers: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
     debug_panel: Optional[np.ndarray] = None
+    is_fallen: bool = False
+    observed_frame: Optional[int] = None
 
 
 class DominoLabelProvider:

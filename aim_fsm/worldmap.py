@@ -148,7 +148,7 @@ class WorldObject():
         for attr in ('image_center', 'image_quad', 'image_axis', 'image_divider',
                      'half_counts', 'half_image_centers', 'half_world_centers',
                      'mask_area', 'face_label', 'face_confidence', 'confidence',
-                     'is_fallen', 'observed_frame'):
+                     'is_fallen', 'observed_frame', 'gpt_geometry_fallback'):
             if hasattr(self, attr):
                 value = getattr(self, attr)
                 if halves_reversed:
@@ -359,6 +359,7 @@ class DominoObj(WorldObject):
         self.half_image_centers = None
         self.half_world_centers = None
         self.mask_area = None
+        self.gpt_geometry_fallback = False
         # Camera frame this tile's pips were last read from. Consumers use it
         # to tell a fresh reading from the same reading looked at twice.
         self.observed_frame = None
@@ -624,7 +625,10 @@ class WorldMap():
                                      (float(divider[1][0]), float(divider[1][1])))
             obj.mask_area = float(getattr(obs, 'mask_area', 0.0))
             obj.confidence = float(getattr(obs, 'confidence', 1.0))
-            obj.observed_frame = getattr(self.robot, 'frame_count', None)
+            obj.gpt_geometry_fallback = bool(
+                getattr(obs, 'gpt_geometry_fallback', False))
+            obj.observed_frame = getattr(
+                obs, 'observed_frame', getattr(self.robot, 'frame_count', None))
             obj.is_visible = True
             self.candidates.append(obj)
 
@@ -945,7 +949,8 @@ class WorldMap():
                 match.pose.kf_theta.state = match.pose.theta
             for attr in ('image_center', 'image_quad', 'image_axis', 'image_divider',
                          'half_counts', 'half_image_centers', 'half_world_centers',
-                         'mask_area', 'face_label', 'face_confidence', 'confidence'):
+                         'mask_area', 'face_label', 'face_confidence', 'confidence',
+                         'gpt_geometry_fallback'):
                 setattr(match, attr, getattr(obj, attr, None))
             match.is_fallen = getattr(obj, 'is_fallen', False)
         self.updated_objects.append(match)

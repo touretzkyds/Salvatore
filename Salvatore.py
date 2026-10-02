@@ -1,5 +1,6 @@
 from aim_fsm import *
 from aim_fsm.events import OpenAIEvent
+import os
 import random
 
 CELESTE_VERSION = "1.4"
@@ -582,6 +583,14 @@ class Salvatore(StateMachineProgram):
         kwargs.setdefault('domino', True)
         kwargs.setdefault('domino_labeling', True)
         kwargs.setdefault('domino_optional', True)
+        kwargs.setdefault(
+            'domino_vision_mode',
+            os.getenv('SALVATORE_DOMINO_VISION_MODE', 'local'),
+        )
+        kwargs.setdefault(
+            'domino_gpt_model',
+            os.getenv('SALVATORE_DOMINO_GPT_MODEL', 'gpt-6.1-sol'),
+        )
         super().__init__(**kwargs)
 
     def picked_up_celeste(self):
