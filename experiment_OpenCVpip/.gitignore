@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+
+# Keep generated benchmark artifacts local. The directory-level README remains tracked.
+results/*
+!results/README.md
