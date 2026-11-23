@@ -549,6 +549,9 @@ class WorldMap():
     def make_new_domino_objects(self):
         "Turn this frame's domino detections into DominoObj candidates."
         detector = getattr(self.robot, 'domino_detector', None)
+        if detector is not None and hasattr(detector, 'world_map_candidates'):
+            self.candidates.extend(detector.world_map_candidates())
+            return
         image = getattr(self.robot, 'camera_image', None)
         if detector is None or image is None:
             return
@@ -558,6 +561,10 @@ class WorldMap():
             print(f'*** Domino detector failed: {exc}')
             return
 
+        self.candidates.extend(self.domino_objects_from_observations(observations))
+
+    def domino_objects_from_observations(self, observations):
+        """Project existing observations once; no model inference is performed."""
         for obs in observations:
             quad = getattr(obs, 'quad', None)
             quad = np.array(quad, dtype=np.float32) if quad is not None else None
@@ -630,7 +637,7 @@ class WorldMap():
             obj.observed_frame = getattr(
                 obs, 'observed_frame', getattr(self.robot, 'frame_count', None))
             obj.is_visible = True
-            self.candidates.append(obj)
+            yield obj
 
     def make_new_aruco_objects(self):
         camera_offset_vector = np.array([0, 0, self.robot.kine.camera_from_origin])

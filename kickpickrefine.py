@@ -2,6 +2,7 @@ import os
 import cv2
 import math
 import time
+from types import SimpleNamespace
 import numpy as np
 import torch
 import torch.nn as nn
@@ -10,6 +11,9 @@ from torchvision.models import efficientnet_b0
 from PIL import Image
 
 from aim_fsm import *
+from aim_fsm.domino import directed_long_axis
+from aim_fsm.domino_map_publisher import DominoMapPublisher, observations_from_candidates
+from lab8.domino_half_face_pipeline import rectify_domino
 from ultralytics import YOLO
 
 # ==========================================
@@ -22,9 +26,9 @@ FOCAL_LENGTH = 396.3    # Ground-truth focal value
 CAMERA_HFOV_DEG = 62.0  # Horizontal angle ref
 
 # Model Paths
-SEG_MODEL_PATH = os.path.join(PROJECT_DIR, "bestieee.pt")
-CLS_MODEL_PATH = os.path.join(PROJECT_DIR, "different.pt")
-FALLEN_MODEL_PRIMARY = os.path.join(PROJECT_DIR, "fallen.pt")
+SEG_MODEL_PATH = os.path.join(PROJECT_DIR, "weights", "bestieee.pt")
+CLS_MODEL_PATH = os.path.join(PROJECT_DIR, "weights", "different.pt")
+FALLEN_MODEL_PRIMARY = os.path.join(PROJECT_DIR, "weights", "fallen.pt")
 FALLEN_MODEL_FALLBACK = os.path.join(
     PROJECT_DIR, "runs_play_dominos", "play_dominos_seg_v1_img160", "weights", "bestieee.pt"
 )
@@ -130,6 +134,19 @@ def estimate_divider_x(image_bgr: np.ndarray, x1: float, y1: float, x2: float, y
     return float(ix1 + divider_x_local)
 
 
+def contour_quad(contour):
+    """Use the outline corners when possible, retaining their perspective."""
+    hull = cv2.convexHull(np.asarray(contour, dtype=np.float32))
+    perimeter = cv2.arcLength(hull, True)
+    for fraction in (0.015, 0.025, 0.035, 0.045, 0.055):
+        polygon = cv2.approxPolyDP(hull, fraction * perimeter, True)
+        if len(polygon) == 4:
+            return polygon.reshape(4, 2)
+        if len(polygon) < 4:
+            break
+    return cv2.boxPoints(cv2.minAreaRect(hull))
+
+
 def roboflow_fit_resize(img, size=MODEL_SIZE):
     h, w = img.shape[:2]
     scale = min(size / w, size / h)
@@ -195,16 +212,20 @@ def project_pixel_to_base(robot, px, py, bbox_long_side_px=None, frame_width=640
 # ==========================================
 class kickpickrefine(StateMachineProgram):
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *, standing_weights=None, fallen_weights=None, **program_options):
+        super().__init__(domino=False, **program_options)
+        self.map_publisher = DominoMapPublisher(self.robot)
+        self.robot.domino_detector = self.map_publisher
 
         print("Initializing Fully Self-Contained Kick & Measure Pipeline...")
         
         # Standing Segmenter
-        if os.path.exists(SEG_MODEL_PATH):
-            self.segmenter = YOLO(SEG_MODEL_PATH)
+        standing_model_path = standing_weights or SEG_MODEL_PATH
+        if os.path.exists(standing_model_path):
+            print(f"Loading standing segmentation weights: {standing_model_path}")
+            self.segmenter = YOLO(standing_model_path)
         else:
-            print(f"Warning: Segmenter weights '{SEG_MODEL_PATH}' not found!")
+            print(f"Warning: Segmenter weights '{standing_model_path}' not found!")
             self.segmenter = None
 
         # Standing Classifier
@@ -230,7 +251,10 @@ class kickpickrefine(StateMachineProgram):
 
         # Fallen Model Setup
         self.fallen_model_path = None
-        if os.path.exists(FALLEN_MODEL_PRIMARY):
+        if fallen_weights is not None:
+            if os.path.isfile(fallen_weights):
+                self.fallen_model_path = fallen_weights
+        elif os.path.exists(FALLEN_MODEL_PRIMARY):
             self.fallen_model_path = FALLEN_MODEL_PRIMARY
         elif os.path.exists(FALLEN_MODEL_FALLBACK):
             self.fallen_model_path = FALLEN_MODEL_FALLBACK
@@ -245,6 +269,14 @@ class kickpickrefine(StateMachineProgram):
 
         self.target = None
         self.debug_view = None
+
+    def publish_dominoes(self, candidates, frame_id, *, is_fallen=False):
+        """Display existing detections without affecting target selection or motion."""
+        try:
+            observations = observations_from_candidates(candidates, frame_id, is_fallen=is_fallen)
+            self.map_publisher.publish(observations)
+        except Exception as exc:
+            print(f"[WORLD-MAP] Unable to publish domino observations: {exc}")
 
     def _load_classifier(self, path):
         try:
@@ -364,6 +396,172 @@ class kickpickrefine(StateMachineProgram):
             print(f"predict_half failed: {exc}")
             return None, 0.0
 
+    def standing_candidates(self, frame, *, rectify_masks=False, diagnostics=None):
+        """Run the standing detector and read both halves of every visible tile."""
+        if diagnostics is not None:
+            diagnostics["detections"] = 0
+        if frame is None or self.segmenter is None:
+            return []
+
+        _, image_w = frame.shape[:2]
+        results = self.segmenter(frame, conf=0.25, iou=0.5, agnostic_nms=True, verbose=False)
+
+        if not results:
+            return []
+
+        result = results[0]
+        candidates = []
+        obb = getattr(result, "obb", None)
+        boxes = getattr(result, "boxes", None)
+        masks = getattr(result, "masks", None)
+        outlines = masks.xy if rectify_masks and masks is not None else ()
+        quads_info = []
+        detected_indexes = set()
+
+        if obb is not None and len(obb) > 0:
+            raw_quads = list(obb.xyxyxyxy.cpu().numpy())
+            for idx, q in enumerate(raw_quads):
+                quads_info.append((q, None, None))
+                detected_indexes.add(idx)
+
+        if boxes is not None and len(boxes) > 0:
+            xyxy = boxes.xyxy.cpu().numpy()
+            for idx, box in enumerate(xyxy):
+                if idx not in detected_indexes:
+                    x1b, y1b, x2b, y2b = box
+                    quad = np.array([[x1b, y1b], [x2b, y1b], [x2b, y2b], [x1b, y2b]], dtype=np.float32)
+                    pixel_length = max(x2b - x1b, y2b - y1b)
+                    outline = outlines[idx] if idx < len(outlines) and len(outlines[idx]) >= 4 else None
+                    quads_info.append((quad, pixel_length, outline))
+
+        if diagnostics is not None:
+            diagnostics["detections"] = len(quads_info)
+        for raw_obb, fallback_length, outline in quads_info:
+            if outline is None:
+                crop, bbox, pixel_length = self.rotate_crop(frame, raw_obb)
+            else:
+                try:
+                    raw_obb = contour_quad(outline)
+                    theta, pixel_length = directed_long_axis(raw_obb)
+                    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                    cv2.fillPoly(mask, [np.rint(outline).astype(np.int32)], 255)
+                    crop = rectify_domino(frame, SimpleNamespace(
+                        axis_theta=theta, center_xy=raw_obb.mean(axis=0), quad=raw_obb,
+                        mask=mask, divider_endpoints=None,
+                    )).full_crop_rgb
+                    x1, y1, w, h = cv2.boundingRect(raw_obb)
+                    bbox = (x1, y1, x1 + w, y1 + h)
+                except (ValueError, cv2.error):
+                    continue
+            if pixel_length <= 0 and fallback_length is not None:
+                pixel_length = fallback_length
+
+            if crop is None or crop.size == 0 or pixel_length <= 0:
+                continue
+
+            h, w, _ = crop.shape
+            if h < 50 or w < 50:
+                continue
+
+            if outline is not None:
+                # The face is horizontal after rectification. Ignore the divider
+                # itself so it cannot be counted as a pip.
+                split = estimate_divider_x(crop, 0, h * 0.10, w, h * 0.90)
+                mid = int(round(split)) if split is not None else w // 2
+                margin = 3 if split is not None else 0
+                left_raw, right_raw = crop[:, :mid - margin], crop[:, mid + margin:]
+            else:
+                left_raw, right_raw = self.split_halves(crop)
+            if left_raw is None or right_raw is None:
+                continue
+
+            left_clean = left_raw if outline is not None else self.remove_white_border(left_raw)
+            right_clean = right_raw if outline is not None else self.remove_white_border(right_raw)
+
+            if left_clean is None or right_clean is None or left_clean.size == 0 or right_clean.size == 0:
+                continue
+
+            left_tensor = self.preprocess_half(left_clean)
+            right_tensor = self.preprocess_half(right_clean)
+
+            if left_tensor is None or right_tensor is None:
+                continue
+
+            left_pred, left_conf = self.predict_half(left_tensor)
+            right_pred, right_conf = self.predict_half(right_tensor)
+
+            if left_pred is None or right_pred is None:
+                continue
+
+            x1_box, y1_box, x2_box, y2_box = bbox
+            cx = float((x1_box + x2_box) * 0.5)
+
+            divider_x = estimate_divider_x(frame, x1_box, y1_box, x2_box, y2_box)
+            aim_x = float(divider_x) if divider_x is not None else cx
+
+            angle_deg, distance_cm = estimate_angle_and_distance_cm(aim_x, image_w, pixel_length)
+            aim_error_px = float(aim_x - (image_w * 0.5))
+
+            candidates.append({
+                "bbox": bbox,
+                "quad": raw_obb.copy(),
+                "label": f"{left_pred}-{right_pred}",
+                "confidence": min(left_conf, right_conf),
+                "cx": cx,
+                "aim_x": aim_x,
+                "cy": float((y1_box + y2_box) * 0.5),
+                "angle_deg": angle_deg,
+                "distance_cm": distance_cm,
+                "aim_error_px": aim_error_px,
+                "using_black_line": (divider_x is not None)
+            })
+
+        return candidates
+
+    def fallen_candidates(self, image, result, resize_geometry):
+        """Convert one fallen model result into rectangles in the original image."""
+        scale, pad_x, pad_y, new_w, new_h = resize_geometry
+        h, w = image.shape[:2]
+        mask_data = result.masks.data
+        candidates = []
+
+        for i in range(len(mask_data)):
+            mask_small = mask_data[i].detach().cpu().numpy()
+            if np.count_nonzero(mask_small > 0.1) == 0:
+                continue
+
+            mask_orig = map_mask_to_original(mask_small, pad_x, pad_y, new_w, new_h, w, h)
+            mask_area = float(cv2.countNonZero(mask_orig))
+            contours, _ = cv2.findContours(mask_orig, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            if not contours:
+                small_contours, _ = cv2.findContours((mask_small > 0.1).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if not small_contours:
+                    continue
+                cnt_small = max(small_contours, key=cv2.contourArea)
+                rect_small = cv2.minAreaRect(cnt_small)
+                (cx_s, cy_s), (rw_s, rh_s), ang_s = rect_small
+                cx = (cx_s - pad_x) / scale
+                cy = (cy_s - pad_y) / scale
+                rect = ((cx, cy), (rw_s / scale, rh_s / scale), ang_s)
+                mask_area = float(cv2.contourArea(cnt_small)) / (scale * scale)
+                contour = (cnt_small.reshape(-1, 2).astype(np.float32) - (pad_x, pad_y)) / scale
+            else:
+                cnt = max(contours, key=cv2.contourArea)
+                rect = cv2.minAreaRect(cnt)
+                (cx, cy), _, _ = rect
+                contour = cnt.reshape(-1, 2)
+
+            candidates.append({
+                "mask_area": mask_area,
+                "cx": cx,
+                "cy": cy,
+                "rect": rect,
+                "contour": contour,
+            })
+
+        return candidates
+
     def measure_lateral_offset_mm(self, frame, conf=0.15):
         if frame is None or self.segmenter is None:
             return 0.0, False
@@ -418,98 +616,16 @@ class kickpickrefine(StateMachineProgram):
         def start(self, event=None):
             super().start(event)
             frame = self.robot.camera_image
+            frame_id = self.robot.frame_count
 
             if frame is None or self.parent.segmenter is None:
+                self.parent.publish_dominoes([], frame_id)
                 self.parent.target_data = None
                 self.post_failure()
                 return
 
-            image_h, image_w = frame.shape[:2]
-            results = self.parent.segmenter(frame, conf=0.25, iou=0.5, agnostic_nms=True, verbose=False)
-
-            if not results:
-                self.parent.target_data = None
-                self.post_failure()
-                return
-
-            result = results[0]
-            candidates = []
-            obb = getattr(result, "obb", None)
-            boxes = getattr(result, "boxes", None)
-            quads_info = []
-            detected_indexes = set()
-
-            if obb is not None and len(obb) > 0:
-                raw_quads = list(obb.xyxyxyxy.cpu().numpy())
-                for idx, q in enumerate(raw_quads):
-                    quads_info.append((q, None))
-                    detected_indexes.add(idx)
-
-            if boxes is not None and len(boxes) > 0:
-                xyxy = boxes.xyxy.cpu().numpy()
-                for idx, box in enumerate(xyxy):
-                    if idx not in detected_indexes:
-                        x1b, y1b, x2b, y2b = box
-                        quad = np.array([[x1b, y1b], [x2b, y1b], [x2b, y2b], [x1b, y2b]], dtype=np.float32)
-                        pixel_length = max(x2b - x1b, y2b - y1b)
-                        quads_info.append((quad, pixel_length))
-
-            for raw_obb, fallback_length in quads_info:
-                crop, bbox, pixel_length = self.parent.rotate_crop(frame, raw_obb)
-                if pixel_length <= 0 and fallback_length is not None:
-                    pixel_length = fallback_length
-
-                if crop is None or crop.size == 0 or pixel_length <= 0:
-                    continue
-
-                h, w, _ = crop.shape
-                if h < 50 or w < 50:
-                    continue
-
-                left_raw, right_raw = self.parent.split_halves(crop)
-                if left_raw is None or right_raw is None:
-                    continue
-
-                left_clean = self.parent.remove_white_border(left_raw)
-                right_clean = self.parent.remove_white_border(right_raw)
-
-                if left_clean is None or right_clean is None or left_clean.size == 0 or right_clean.size == 0:
-                    continue
-
-                left_tensor = self.parent.preprocess_half(left_clean)
-                right_tensor = self.parent.preprocess_half(right_clean)
-
-                if left_tensor is None or right_tensor is None:
-                    continue
-
-                left_pred, left_conf = self.parent.predict_half(left_tensor)
-                right_pred, right_conf = self.parent.predict_half(right_tensor)
-
-                if left_pred is None or right_pred is None:
-                    continue
-
-                x1_box, y1_box, x2_box, y2_box = bbox
-                cx = float((x1_box + x2_box) * 0.5)
-
-                divider_x = estimate_divider_x(frame, x1_box, y1_box, x2_box, y2_box)
-                aim_x = float(divider_x) if divider_x is not None else cx
-
-                angle_deg, distance_cm = estimate_angle_and_distance_cm(aim_x, image_w, pixel_length)
-                aim_error_px = float(aim_x - (image_w * 0.5))
-
-                candidates.append({
-                    "bbox": bbox,
-                    "label": f"{left_pred}-{right_pred}",
-                    "confidence": min(left_conf, right_conf),
-                    "cx": cx,
-                    "aim_x": aim_x,
-                    "cy": float((y1_box + y2_box) * 0.5),
-                    "angle_deg": angle_deg,
-                    "distance_cm": distance_cm,
-                    "aim_error_px": aim_error_px,
-                    "using_black_line": (divider_x is not None)
-                })
-
+            candidates = self.parent.standing_candidates(frame)
+            self.parent.publish_dominoes(candidates, frame_id)
             if not candidates:
                 self.parent.target_data = None
                 self.post_failure()
@@ -520,7 +636,7 @@ class kickpickrefine(StateMachineProgram):
 
             for cand in candidates:
                 bx1, by1, bx2, by2 = map(int, cand["bbox"])
-                if cand["label"] in ["3-4", "4-3"]:
+                if cand["label"] in ["3-4", "4-3", "2-3", "3-2"]:
                     box_color = (0, 255, 0)
                     label_text = f"TARGET: {cand['label']} ({cand['confidence']:.2f})"
                     valid_targets.append(cand)
@@ -693,6 +809,7 @@ class kickpickrefine(StateMachineProgram):
         def start(self, event=None):
             super().start(event)
             if self.parent.fallen_model is None:
+                self.parent.publish_dominoes([], self.robot.frame_count, is_fallen=True)
                 print("[FALLEN-DETECT] ERROR: Fallen model is missing/None!")
                 self.post_failure()
                 return
@@ -703,6 +820,7 @@ class kickpickrefine(StateMachineProgram):
             results = []
             for attempt in range(DETECT_TRIES):
                 image = self.robot.camera_image
+                frame_id = self.robot.frame_count
                 if image is None:
                     time.sleep(DETECT_RETRY_DELAY_SEC)
                     continue
@@ -724,49 +842,17 @@ class kickpickrefine(StateMachineProgram):
                 time.sleep(DETECT_RETRY_DELAY_SEC)
 
             if image is None or len(results) == 0 or results[0].masks is None:
+                self.parent.publish_dominoes([], frame_id, is_fallen=True)
                 print("[FALLEN-DETECT] FAILED: No fallen domino detected.")
                 self.post_failure()
                 return
 
             h, w = image.shape[:2]
             view = image.copy()
-
-            result = results[0]
-            mask_data = result.masks.data
-            candidates = []
-
-            for i in range(len(mask_data)):
-                mask_small = mask_data[i].detach().cpu().numpy()
-                if np.count_nonzero(mask_small > 0.1) == 0:
-                    continue
-
-                mask_orig = map_mask_to_original(mask_small, pad_x, pad_y, new_w, new_h, w, h)
-                mask_area = float(cv2.countNonZero(mask_orig))
-                contours, _ = cv2.findContours(mask_orig, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-                if not contours:
-                    small_contours, _ = cv2.findContours((mask_small > 0.1).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if not small_contours:
-                        continue
-                    cnt_small = max(small_contours, key=cv2.contourArea)
-                    rect_small = cv2.minAreaRect(cnt_small)
-                    (cx_s, cy_s), (rw_s, rh_s), ang_s = rect_small
-                    cx = (cx_s - pad_x) / scale
-                    cy = (cy_s - pad_y) / scale
-                    rect = ((cx, cy), (rw_s / scale, rh_s / scale), ang_s)
-                    mask_area = float(cv2.contourArea(cnt_small)) / (scale * scale)
-                else:
-                    cnt = max(contours, key=cv2.contourArea)
-                    rect = cv2.minAreaRect(cnt)
-                    (cx, cy), _, _ = rect
-
-                candidates.append({
-                    "mask_area": mask_area,
-                    "cx": cx,
-                    "cy": cy,
-                    "rect": rect
-                })
-
+            candidates = self.parent.fallen_candidates(
+                image, results[0], (scale, pad_x, pad_y, new_w, new_h)
+            )
+            self.parent.publish_dominoes(candidates, frame_id, is_fallen=True)
             if len(candidates) == 0:
                 print("[FALLEN-DETECT] FAILED: Zero mask candidates.")
                 self.post_failure()
